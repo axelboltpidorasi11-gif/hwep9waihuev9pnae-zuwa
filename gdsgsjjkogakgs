@@ -14233,7 +14233,7 @@ function Menu.loadLibrary()
 		{ 'vols[ev.key] = math.clamp(v, 0, 100)', 'vols[ev.key] = math.clamp(v, 0, 500)' },
 		{ 's.Volume = math.clamp(vol or 100, 0, 100) / 100', 's.Volume = math.clamp(vol or 100, 0, 500) / 100' },
 		{ 'vs:AddSlider(ev.name, 0, 100, vols[ev.key]', 'vs:AddSlider(ev.name, 0, 500, vols[ev.key]' },
-		{ 'SaveText.Text = activeConfigName or "Default"\n\t\tUpdateSavePillWidth(SaveText.Text, true)\n\t\t-- The active preset is remembered for the next run.\n\t\tWindowObj._writeLastConfig(activeConfigName or "Default")', 'SaveText.Text = activeConfigName or "Default"\n\t\tpcall(UpdateSavePillWidth, SaveText.Text, true)\n\t\tpcall(WindowObj._writeLastConfig, activeConfigName or "Default")' },
+		{ 'SaveText.Text = activeConfigName or "Default"\n\t\tUpdateSavePillWidth(SaveText.Text, true)\n\t\t-- The active preset is remembered for the next run.\n\t\tWindowObj._writeLastConfig(activeConfigName or "Default")', 'SaveText.Text = activeConfigName or "Default"\n\t\tpcall(WindowObj._writeLastConfig, activeConfigName or "Default")' },
 		{ 'local homeParent, homePos, homeSize\n', 'local homeParent, homePos, homeSize, homeZ\n' },
 		{ 'homeParent, homePos, homeSize = preview.Parent, preview.Position, preview.Size\n', 'homeParent, homePos, homeSize = preview.Parent, preview.Position, preview.Size\n\t\t\t\t\thomeZ = preview.ZIndex\n' },
 		{ '\t\t\t\t\t\tpreview.Position, preview.Size = homePos, homeSize\n', '\t\t\t\t\t\tpreview.Position, preview.Size = homePos, homeSize\n\t\t\t\t\t\tif homeZ then pcall(ApplyZIndexLadder, preview, homeZ) end\n' },
@@ -15174,7 +15174,7 @@ function Menu.visuals(window, hk)
 	hk["Radar"] = worldHud:AddToggle("Radar", hud.radar, set(hud, "radar"))
 
 	local radarSettings = hk["Radar"]:AddSettings()
-	radarSettings:AddSlider("Size", 50, 200, hud.radarSize or 100, set(hud, "radarSize"), "%")
+	radarSettings:AddSlider("Radar Size", 50, 200, hud.radarSize or 100, set(hud, "radarSize"), "%")
 	local overlayMode = world.removeOverlay and "None" or (world.scopeLines and "Lines" or "Default")
 	local overlayControl = worldHud:AddDropdownColorpicker("Scope Overlay", { "Default", "Lines", "None" }, world.scopeColor, function(option)
 		world.removeOverlay = option == "None"
@@ -16615,27 +16615,37 @@ function Menu.build()
 		window._autoLoaded = false
 		pcall(window._autoLoad)
 	end)
-	-- The save pill always shows the active config's name (not the "Default" placeholder), including right after startup.
+	-- The save pill always shows the active config's name (not the "Default" placeholder) and resizes to fit it.
 	do
-		local lastCheck = 0
+		local lastCheck, shown = 0, nil
+		local textService = game:GetService("TextService")
 		maid:give(runService.Heartbeat:Connect(function()
 			local now = os.clock()
-			if now - lastCheck < 0.5 then return end
+			if now - lastCheck < 0.4 then return end
 			lastCheck = now
 			local box = window._saveBox
-			local label = box and box:FindFirstChild("SaveText", true)
+			local label = box and box.Parent and box.Parent:FindFirstChild("SaveText")
 			if not label then return end
 			local name = window._activePresetName
 			if not name and now > 3 and isfile and readfile then
 				local path = "NeverloseConfig_1__last.txt"
 				local okFile, exists = pcall(isfile, path)
 				local okRead, saved = okFile and exists and pcall(readfile, path)
-				if okRead and type(saved) == "string" and saved ~= "" and window._setActiveConfig then
-					pcall(window._setActiveConfig, saved)
-					name = window._activePresetName
-				end
+				if okRead and type(saved) == "string" and saved ~= "" then name = saved end
 			end
-			if name and label.Text ~= name then label.Text = name end
+			if not name then return end
+			if label.Text ~= name then label.Text = name end
+			if shown ~= name then
+				shown = name
+				pcall(function()
+					local save = label.Parent
+					local size = textService:GetTextSize(name, 15, label.Font, Vector2.new(1000, 100))
+					local width = math.clamp(math.ceil(size.X) + 83, 150, 266)
+					save.Size = UDim2.fromOffset(width, 28)
+					local presets = save.Parent and save.Parent:FindFirstChild("GlobalPreset")
+					if presets then presets.Position = UDim2.fromOffset(11 + width + 12, 13) end
+				end)
+			end
 		end))
 	end
 

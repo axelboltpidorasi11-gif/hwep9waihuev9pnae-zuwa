@@ -199,12 +199,12 @@ Neverlose.config = {
 	rage = {
 		enabled = false, fov = 180, priority = "Distance", showFov = false, delayWait = { "Hit Chance" }, delayDamage = 50, delayChance = 60, delayMax = 400,
 		silent = false, silentAuto = true, silentHitChance = 100, silentHitbox = "Head",
-		autoFire = false, autowall = false, wallMinDamage = 15,
+		autoFire = false, autowall = false, wallMinDamage = 25,
 		target = "Highest Damage", hitboxes = "Head, Chest, Stomach", multipoint = "Head, Chest, Stomach",
 		hitChance = 50, minDamage = 15, quickStop = false, quickScope = false,
 		history = "High", bodyAfterMiss = true, autoHitChance = true, delayShot = {}, noRecoil = false, recoilReduction = 100, noSpread = false,
 		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 2, originScans = 4, originScanMode = "optimized", originDebug = false, originModel = "Saturn", maxWalls = 2, peekReturn = "Shot",
-		preferBodyLethal = false, preferHead = true, multiTarget = false, scanHz = 30, minDmgOverride = false, minDmgOverrideValue = 5,
+		preferBodyLethal = false, preferHead = true, scanMode = "Balanced", stickyTarget = false, forceBody = false, missToBody = false, missesToBody = 2, maxDist = 0, multiTarget = false, scanHz = 30, minDmgOverride = false, minDmgOverrideValue = 5,
 		autoReload = false, reloadAt = 1, remoteReload = false, instaReload = false, reloadSpeed = 3,
 		hitboxList = { "Head", "Chest", "Stomach" }, multipointList = { "Head", "Chest" },
 	},
@@ -292,7 +292,7 @@ Neverlose.config = {
 		},
 	},
 	hud = {
-		radar = true, radarMode = "Game", radarRange = 120, radarSize = 100, killfeed = false, inaccuracy = false, inaccuracyColor = rgb(200, 200, 200),
+		radar = true, radarMode = "Game", radarRange = 120, radarScale = 100, killfeed = false, inaccuracy = false, inaccuracyColor = rgb(200, 200, 200),
 		scopeOverlay = "Default",
 		scoreboard = false, scoreboardAvatars = true, scoreboardAccent = rgb(26, 123, 255),
 		gear = { enabled = false, hideName = true, primary = true, secondary = true, knife = false, grenade = false, armor = true, kit = true, health = false },
@@ -309,7 +309,7 @@ Neverlose.config = {
 		hitVfx = false, hitVfxStyle = "Auto", impacts = false, impactColor = rgb(255, 100, 200), impactStyle = "Square", impactLife = 2.5, impactSize = 1, impactCount = 16,
 	},
 	movement = {
-		bhop = false, airStrafe = false, strafeStrength = 50, autoDirection = true, strafeHoldJump = false, strafeStopShift = false, alignDeg = 6,
+		bhop = false, airStrafe = false, strafeStrength = 100, strafeMax = 262, autoDirection = true, strafeHoldJump = false, strafeStopShift = false, alignDeg = 6,
 		jumpBug = false, jumpBugDelay = 50, noFall = false, quickStop = false, strafeAssist = false,
 		edgeJump = false, longJump = false, pixelSurf = false, edgeBug = false, fakeAirDuck = false, slowWalk = false, slowWalkSpeed = 30, fastLadder = false, airDuck = false,
 	},
@@ -723,7 +723,12 @@ function Game.side(entity)
 end
 
 function Game.isImmune(character)
-	return character:GetAttribute("Invincible") == true
+	if character:GetAttribute("Invincible") == true then return true end
+	-- Spawn protection is set on the player object, not on the character.
+	for _, entity in ipairs(Game.entities()) do
+		if entity.Character == character then return entity:GetAttribute("Invincible") == true end
+	end
+	return false
 end
 
 function Game.ownerOf(instance)
@@ -1095,7 +1100,7 @@ function Ballistics.wallResult(name, walls, accepted)
 	-- Три отказа подряд по одному и тому же числу стен — только тогда это
 	-- похоже на серверный лимит, а не на разброс или бегущую цель. Раньше
 	-- хватало двух промахов, и автоволл душился на 45 секунд.
-	if Ballistics.wallFails[key] >= 3 then
+	if Ballistics.wallFails[key] >= 2 then
 		Ballistics.wallLimit[name] = { limit = math.max(walls - 1, 0), expires = os.clock() + 20 }
 		Ballistics.wallFails[key] = 0
 	end
@@ -1158,6 +1163,8 @@ function Ballistics.allowedWalls(weapon, enabled, cap)
 	-- Мягкий выученный лимит: сервер уже отклонял пробития с таким числом стен.
 	-- Живёт 20 секунд, чтобы одна неудачная серия не отключала автоволл на
 	-- весь матч, и восстанавливается первым же успешным пробитием.
+	local stats = Neverlose.stats or {}
+	if (stats.wallFail or 0) >= 4 and (stats.wallFail or 0) > (stats.wallOk or 0) * 2 then base = math.min(base, 1) end
 	local learned = weapon and Ballistics.wallLimit[weapon.Name]
 	if learned and os.clock() < learned.expires then return math.max(math.min(base, learned.limit), 0) end
 	return base
@@ -1397,8 +1404,6 @@ local function emitLog(text, icon, count)
 	local damage = icon == "hit" or icon == "kill" or icon == "miss"
 	local options = { type = icon }
 	if damage then
-		local custom = icon == "hit" and misc.hitlogIcon ~= false and hitlogIcon()
-		if custom then options.icon = custom end
 		if typeof(misc.hitlogColor) == "Color3" then options.highlight = misc.hitlogColor end
 	end
 	local payload = count > 1 and (text .. " x" .. count) or text
@@ -3149,10 +3154,34 @@ end
 
 ---Log a missed shot with its reason and feed the miss back to the ragebot.
 function ShotTracker.logMiss(entity, shot)
+	if shot.character and shot.character.Parent and Game.isImmune(shot.character) then return end
 	local name = tostring(entity.DisplayName or entity.Name)
 	local reason, detail = ShotTracker.missReason(shot, entity)
 	Logs.push("Combat", ("missed {%s} ({%s}) · {%s}%s"):format(name, shot.part, reason, detail))
 	HitSounds.play("miss")
+	pcall(function()
+		local rage = Neverlose.Rage
+		if rage and rage.recordShot then rage.recordShot(false) end
+		local stats = Neverlose.stats or {}
+		Neverlose.stats = stats
+		stats.missBy = stats.missBy or {}
+		stats.missBy[reason] = (stats.missBy[reason] or 0) + 1
+		stats.missLog = stats.missLog or {}
+		local info = shot.info or {}
+		table.insert(stats.missLog, ("%s | %s | %s | hc %s | %s st | walls %s | mode %s | shift %s | speed %s"):format(
+			tostring(shot.weapon), tostring(shot.part), reason, tostring(info.chance and math.floor(info.chance + 0.5)),
+			tostring(info.distance and math.floor(info.distance + 0.5)), tostring(shot.walls or 0), tostring(info.mode),
+			tostring(info.shiftMag and math.floor(info.shiftMag * 10 + 0.5) / 10), tostring(shot.speed and math.floor(shot.speed + 0.5))))
+		if #stats.missLog > 60 then table.remove(stats.missLog, 1) end
+		if writefile then
+			local lines = { "misses by reason:" }
+			for key, count in pairs(stats.missBy) do lines[#lines + 1] = ("  %s: %d"):format(key, count) end
+			lines[#lines + 1] = ("hits: %d  shots: %d"):format((stats.hitCount or 0), stats.shots or 0)
+			lines[#lines + 1] = "last misses (weapon | part | reason | hit chance | distance | walls | mode | origin shift | target speed):"
+			for _, line in ipairs(stats.missLog) do lines[#lines + 1] = line end
+			writefile("nev_miss_report.txt", table.concat(lines, "\n"))
+		end
+	end)
 	do
 		local rage = Neverlose.Rage
 		if rage then
@@ -3335,6 +3364,11 @@ if shootRemote and type(shootRemote.Send) == "function" then
 							entity = focus.entity, part = focus.part and focus.part.Name, chance = focus.chance,
 							distance = focus.distance, record = focus.record ~= nil, mode = "silent", shifted = focus.origin ~= nil, shiftMag = focus.origin and (focus.origin - Game.origin()).Magnitude or nil,
 						} or nil
+						-- A shot that was not aimed at the focused target is never charged to it as a miss.
+						if forced and focus.part and focus.part.Parent then
+							local toward = focus.part.Position - bullet.Origin
+							if toward.Magnitude > 0.1 and bullet.Direction.Unit:Dot(toward.Unit) < 0.9945 then forced = nil end
+						end
 						Neverlose.stats = Neverlose.stats or {}
 						Neverlose.stats.sent = (Neverlose.stats.sent or 0) + 1
 						local okRegister, errRegister = pcall(ShotTracker.register, bullet.Origin, bullet.Direction.Unit, hits, range, nil, focus and focus.damage, forced)
@@ -3686,7 +3720,7 @@ end
 ---схлопываемся от обычных промахов. Отдельно учитываем серверный потолок —
 ---он снижается только после серии отказов регистрации и медленно растёт.
 function Rage.originReach()
-	local reach = math.clamp(tonumber(Neverlose.config.rage.originRange) or 2, 0.5, 12)
+	local reach = math.clamp(tonumber(Neverlose.config.rage.originRange) or 2, 0.5, 9.3)
 	if type(Rage.originCap) == "number" then reach = math.min(reach, Rage.originCap) end
 
 	local cap = Rage.shiftCap
@@ -3739,7 +3773,7 @@ function Rage.originShifts()
 
 	local scale = Rage.originScale or 1
 	if scale < 1 then
-		scale = math.min(1, scale + (os.clock() - (Rage.originScaleAt or os.clock())) * 0.04)
+		scale = math.min(1, scale + (os.clock() - (Rage.originScaleAt or os.clock())) * 0.2)
 		Rage.originScale = scale
 	end
 	Rage.originScaleAt = os.clock()
@@ -4060,6 +4094,7 @@ do
 	local function buildAvatar(character)
 		local ok, model = pcall(function()
 			character.Archivable = true
+			for _, object in ipairs(character:GetDescendants()) do object.Archivable = true end
 			return character:Clone()
 		end)
 		if not ok or not model then return nil end
@@ -4138,7 +4173,7 @@ do
 		local mode = Neverlose.config.rage.originModel or "Saturn"
 		-- Вплотную к камере копия игрока закрыла бы весь экран, поэтому
 		-- при сдвиге меньше 1.2 стада остаётся Saturn.
-		if mode == "Self Avatar" and (not origin or (origin - Game.origin()).Magnitude >= 1.2) then
+		if mode == "Self Avatar" and (not origin or (origin - Game.origin()).Magnitude >= 0.5) then
 			local character = Game.localCharacter()
 			local entry = character and acquireAvatar(character)
 			if entry then
@@ -4271,6 +4306,12 @@ do
 		if not character then
 			clearAll()
 			return
+		end
+
+		local mode = config.originModel or "Saturn"
+		if dbg.mode ~= mode then
+			if dbg.mode then clearAll() end
+			dbg.mode = mode
 		end
 
 		local now = os.clock()
@@ -4485,6 +4526,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 
 		local health = character:GetAttribute("Health") or 100
 		local damage = Ballistics.damage(properties, part.Name, distance, walls, character)
+		if walls > 0 and wallPenalty and wallPenalty > 0 and wallPenalty < 1 then damage *= wallPenalty end
 		if damage < math.min(minDamage, health) then return nil end
 		-- Shooting through a wall is a last resort: it has to be worth the bullet.
 		if walls > 0 and not record then
@@ -4496,7 +4538,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 			entity = entity, character = character, part = part, position = position, origin = usedOrigin,
 			offset = record and nil or (position - part.Position),
 			damage = damage, walls = walls, record = record, distance = distance, health = health, pixels = pixels,
-			chance = Ballistics.hitChance(spread, distance, part.Size.Magnitude / 3),
+			chance = Ballistics.hitChance(spread, distance, part.Size.Magnitude / 3) * (walls > 0 and 0.9 ^ walls or 1),
 		}
 	end
 
@@ -4504,6 +4546,9 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 	for _, entity in ipairs(Game.entities()) do
 		if Game.isEnemy(entity, true) then
 			local character = Game.character(entity)
+			local maxDist = tonumber(config.maxDist) or 0
+			local rootPart = maxDist > 0 and character and character:FindFirstChild("HumanoidRootPart")
+			if rootPart and (rootPart.Position - origin).Magnitude > maxDist then character = nil end
 			if character and not Game.isImmune(character) and Rage.inReach(character, origin, range, fovPixels) then
 				local bestAny, bestTorso, bestHead
 
@@ -4553,7 +4598,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 				end
 
 				local missed = Rage.missStreak and Rage.missStreak[entity]
-				local forceBody = false
+				local forceBody = config.forceBody == true or (config.missToBody == true and missed ~= nil and missed.n >= (config.missesToBody or 2))
 				if forceBody then
 					forceBody = false
 					for _, name in ipairs(partNames) do
@@ -4584,8 +4629,11 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 				local chosen = bestAny
 				if chosen and config.preferBodyLethal and bestTorso and bestTorso.damage >= chosen.health then chosen = bestTorso end
 				-- A head that can be landed is worth more than a body shot that does not kill.
+				if chosen and bestHead and chosen ~= bestHead and (Game.isSniper(weapon) or tostring(weapon.Name):lower():find("ssg")) and bestHead.chance >= Rage.requiredChance(weapon, bestHead, config) * 0.6 and (bestHead.walls or 0) <= (chosen.walls or 0) then
+					chosen = bestHead
+				end
 				if chosen and bestHead and chosen ~= bestHead and config.preferHead ~= false and not (bestTorso and bestTorso.damage >= bestTorso.health) then
-					if bestHead.damage > chosen.damage and bestHead.chance >= Rage.requiredChance(weapon, bestHead, config) * 0.85 then chosen = bestHead end
+					if bestHead.damage >= chosen.damage and bestHead.chance >= Rage.requiredChance(weapon, bestHead, config) * 0.6 and (bestHead.walls or 0) <= (chosen.walls or 0) then chosen = bestHead end
 				end
 
 				if chosen then
@@ -4609,10 +4657,8 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 					-- Пробитие — запасной вариант, но не абсолютно последний:
 					-- смертельный выстрел через стену должен перебивать
 					-- царапину по открытой цели, иначе автоволл бесполезен.
-					if (chosen.walls or 0) > 0 then
-						local lethal = chosen.damage >= (chosen.health or 100)
-						score += lethal and -80 or (600 + chosen.walls * 150)
-					end
+					if (chosen.walls or 0) > 0 then score += 100000 end
+					if config.stickyTarget and Rage.stickyEntity == entity and os.clock() - (Rage.stickyAt or 0) < 0.5 then score -= 1e6 end
 					chosen.score = score
 					results[#results + 1] = chosen
 				end
@@ -4622,6 +4668,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 
 	Ballistics.safe = false
 	table.sort(results, function(a, b) return a.score < b.score end)
+	if results[1] then Rage.stickyEntity, Rage.stickyAt = results[1].entity, os.clock() end
 	return results
 end
 
@@ -4773,7 +4820,8 @@ Events.on("rapidAccepted", function()
 end)
 
 function Rage.remoteFire(weapon, target, tap)
-	if (weapon.Rounds or 0) <= 0 or not Game.character(target.entity) or (Neverlose.isDown and Neverlose.isDown(target.entity)) then
+	local targetCharacter = Game.character(target.entity)
+	if (weapon.Rounds or 0) <= 0 or not targetCharacter or Game.isImmune(targetCharacter) or (Neverlose.isDown and Neverlose.isDown(target.entity)) then
 		Rage.lastFail = "target gone"
 		return false
 	end
@@ -4801,7 +4849,7 @@ function Rage.remoteFire(weapon, target, tap)
 			{ chance = target.chance, distance = target.distance, record = target.record ~= nil, direct = true,
 				entity = target.entity, part = target.part and target.part.Name, shifted = target.origin ~= nil,
 				shiftMag = target.origin and (target.origin - Game.origin()).Magnitude or nil,
-				mode = tap == 2 and "double tap" or (Neverlose.config.rage.rapidFire and "rapid fire" or "direct") })
+				mode = tap == 2 and "double tap" or (Neverlose.config.rage.rapidFire and Rage.rapidCapable(weapon) and "rapid fire" or "direct") })
 		if not okReg and os.clock() - (Rage.regErrAt or 0) > 3 then
 			Rage.regErrAt = os.clock()
 			Logs.push("Combat", "tracer failed · " .. tostring(errReg))
@@ -4851,58 +4899,58 @@ Events.on("tapRejected", function()
 	end
 end)
 
+-- Semi-auto guns (snipers, pistols) cannot fire faster; the direct path only broke their cadence.
+function Rage.rapidCapable(weapon)
+	local properties = weapon and weapon.Properties
+	if not properties then return false end
+	return (properties.FireRate or 0.1) < 0.2 and properties.FireMode ~= "Semi" and properties.ShootingOptions ~= "Semi" and properties.ShootingOptions ~= "Revolver"
+end
+
 function Rage.rapidMultiplier(cfg, fireRate, name)
-	local requested = cfg.rapidAuto ~= false and 4 or math.clamp(cfg.rapidSpeed / 100, 1, 6)
-	local cap = fireRate >= 0.3 and 1.2 or fireRate >= 0.2 and 1.4 or fireRate >= 0.12 and 1.8 or 2.3
+	local requested = cfg.rapidAuto ~= false and 3 or math.clamp(cfg.rapidSpeed / 100, 1, 6)
+	local cap = fireRate >= 0.3 and 1.1 or fireRate >= 0.2 and 1.25 or fireRate >= 0.12 and 1.45 or 1.7
 	local limit = math.min(requested, cap)
-	local learned = name and Rage.rapidLearn and Rage.rapidLearn[name]
+	local learned = name and Rage.rapidLearn[name]
 	return learned and math.min(limit, learned) or limit
 end
 
-Rage.rapidPenalty = 0
+-- Speed follows the share of boosted shots the server rejected over the last few.
 Rage.rapidLearn = {}
-Events.on("rapidRejected", function() Rage.rapidCoolUntil = os.clock() + 1.5 end)
-
-Events.on("rapidRejected", function()
-	Neverlose.stats = Neverlose.stats or {}
-	Neverlose.stats.rapidFail = (Neverlose.stats.rapidFail or 0) + 1
+Rage.rapidWindow = {}
+local function rapidRecord(accepted)
 	local weapon = Game.weapon()
 	if not (weapon and weapon.Name) then return end
-	-- One stray miss is noise; slow down only when rejections cluster.
-	local now = os.clock()
-	Rage.rapidFailTimes = Rage.rapidFailTimes or {}
-	local times = Rage.rapidFailTimes
-	times[#times + 1] = now
-	while #times > 0 and now - times[1] > 1.5 do table.remove(times, 1) end
-	if #times < 2 then return end
-	Rage.rapidFailTimes = {}
+	local name = weapon.Name
+	local window = Rage.rapidWindow[name] or {}
+	Rage.rapidWindow[name] = window
+	window[#window + 1] = accepted
+	if #window > 8 then table.remove(window, 1) end
+	local fails = 0
+	for _, ok in ipairs(window) do if not ok then fails += 1 end end
+	local fireRate = weapon.Properties and weapon.Properties.FireRate or 0.1
 	local cfg = Neverlose.config.rage
-	local fireRate = weapon.Properties and weapon.Properties.FireRate or 0.1
 	local base = Rage.rapidMultiplier(cfg, fireRate)
-	local speed = math.max((Rage.rapidLearn[weapon.Name] or base) * 0.85, 1)
-	Rage.rapidCeiling, Rage.rapidCeilingAt = Rage.rapidCeiling or {}, Rage.rapidCeilingAt or {}
-	Rage.rapidCeiling[weapon.Name] = math.min(Rage.rapidCeiling[weapon.Name] or math.huge, speed * 1.1)
-	Rage.rapidCeilingAt[weapon.Name] = now
-	Rage.rapidLearn[weapon.Name] = speed
-	Logs.push("Combat", ("rapid fire slowed to x{%.2f}"):format(speed))
-end)
-Events.on("rapidAccepted", function()
+	local current = Rage.rapidLearn[name] or base
 	Neverlose.stats = Neverlose.stats or {}
-	Neverlose.stats.rapidOk = (Neverlose.stats.rapidOk or 0) + 1
-	local weapon = Game.weapon()
-	local learned = weapon and weapon.Name and Rage.rapidLearn[weapon.Name]
-	if not learned then return end
-	local fireRate = weapon.Properties and weapon.Properties.FireRate or 0.1
-	local base = Rage.rapidMultiplier(Neverlose.config.rage, fireRate)
-	local ceiling = Rage.rapidCeiling and Rage.rapidCeiling[weapon.Name]
-	if ceiling and os.clock() - ((Rage.rapidCeilingAt or {})[weapon.Name] or 0) > 20 then
-		Rage.rapidCeiling[weapon.Name] = nil
-		ceiling = nil
+	if accepted then
+		Neverlose.stats.rapidOk = (Neverlose.stats.rapidOk or 0) + 1
+		if fails == 0 and #window >= 5 and Rage.rapidLearn[name] then
+			local nextSpeed = current + 0.03
+			Rage.rapidLearn[name] = nextSpeed >= base and nil or nextSpeed
+		end
+	else
+		Neverlose.stats.rapidFail = (Neverlose.stats.rapidFail or 0) + 1
+		Rage.rapidCoolUntil = os.clock() + 1.5
+		if fails >= 2 then
+			local speed = math.max(current * 0.9, 1)
+			Rage.rapidLearn[name] = speed
+			Rage.rapidWindow[name] = {}
+			Logs.push("Combat", ("rapid fire slowed to x{%.2f}"):format(speed))
+		end
 	end
-	local nextSpeed = learned + 0.03
-	if ceiling and nextSpeed > ceiling then nextSpeed = ceiling end
-	Rage.rapidLearn[weapon.Name] = nextSpeed >= base and not ceiling and nil or nextSpeed
-end)
+end
+Events.on("rapidRejected", function() rapidRecord(false) end)
+Events.on("rapidAccepted", function() rapidRecord(true) end)
 
 function Rage.remoteReload(weapon)
 	local properties = weapon.Properties
@@ -4963,7 +5011,15 @@ end))
 function Rage.refresh(weapon, config)
 	local now = os.clock()
 
-	local interval = #Rage.targets == 0 and 1 / 45 or (((Neverlose.stats or {}).scanMs or 99) < 2.5 and 1 / 60 or 1 / math.max(config.scanHz, 1))
+	local scanMs = (Neverlose.stats or {}).scanMs or 99
+	local fast = config.scanMode == "Performance"
+	local interval
+	if #Rage.targets == 0 then
+		interval = (not fast and scanMs < 2.5) and 1 / 60 or 1 / (fast and 30 or 45)
+	else
+		interval = (not fast and scanMs < 2.5) and 1 / 60 or 1 / math.max(fast and math.min(config.scanHz, 40) or config.scanHz, 1)
+	end
+	if scanMs > 4 then interval = math.max(interval, scanMs * 6 / 1000) end
 	if now - Rage.lastScan >= interval then
 		Rage.lastScan = now
 		local scanStart = os.clock()
@@ -5009,8 +5065,37 @@ function Rage.requiredChance(weapon, target, config)
 	if (target.damage or 0) >= (target.health or 100) then need -= 15 end
 	local streak = Rage.missStreak and Rage.missStreak[target.entity]
 	if streak and os.clock() - streak.t < 2.5 then need += math.min(streak.n * 3, 9) end
+	need += Rage.accuracyBonus()
 	return math.clamp(need, 20, 95)
 end
+
+-- Recent real results tune how picky the ragebot is: many misses -> wait for better shots.
+Rage.accWindow = {}
+function Rage.recordShot(ok)
+	local window = Rage.accWindow
+	if #window > 0 and os.clock() - (Rage.accAt or 0) > 25 then table.clear(window) end
+	Rage.accAt = os.clock()
+	window[#window + 1] = ok
+	if #window > 12 then table.remove(window, 1) end
+end
+function Rage.accuracyBonus()
+	local window = Rage.accWindow
+	if #window < 5 or os.clock() - (Rage.accAt or 0) > 25 then return 0 end
+	local hits = 0
+	for _, ok in ipairs(window) do if ok then hits += 1 end end
+	local rate = hits / #window
+	if rate < 0.35 then return 14 end
+	if rate < 0.5 then return 9 end
+	if rate < 0.65 then return 4 end
+	if rate > 0.85 then return -3 end
+	return 0
+end
+Events.on("hit", function()
+	Rage.recordShot(true)
+	Neverlose.stats = Neverlose.stats or {}
+	Neverlose.stats.hitCount = (Neverlose.stats.hitCount or 0) + 1
+end)
+Events.on("kill", function() Rage.recordShot(true) end)
 
 local function rageStep()
 	local config = Neverlose.config.rage
@@ -5041,19 +5126,34 @@ local function rageStep()
 	local sniper = Game.isSniper(weapon)
 	local revolver = weapon.Properties.ShootingOptions == "Revolver"
 
-	local direct = not revolver and (config.doubleTap or config.rapidFire)
+	local direct = not revolver and (config.doubleTap or (config.rapidFire and Rage.rapidCapable(weapon)))
 	local need = Rage.requiredChance(weapon, target, config)
+	-- An enemy that just stepped out gets shot at once, before he steps back.
+	local fresh = Rage.seenAt and os.clock() - Rage.seenAt < 0.45 and (target.walls or 0) == 0 and (target.damage or 0) >= math.max(config.minDamage or 0, 1)
+
+	-- A target strafing across the line of fire is the main source of misses at range.
+	local lateral = 0
+	do
+		local velocity = Ballistics.velocity(target.entity)
+		local line = target.position and target.position - Game.origin()
+		if velocity and line and line.Magnitude > 1 then
+			local dir = line.Unit
+			lateral = (velocity - dir * velocity:Dot(dir)).Magnitude
+		end
+	end
+	if lateral > 14 and not fresh and (target.distance or 0) > 35 then need = math.min(need + math.min((lateral - 14) * 0.8, 12), 97) end
+	if Rage.stable < 2 and not fresh then return end
 
 	if (target.walls or 0) > 0 then
 		need = math.min(need + 8, 97)
-		if Rage.stable < 4 then return end
+		if Rage.stable < 5 then return end
 	end
-	if not direct and target.chance < need then return end
+	if not direct and target.chance < (fresh and need * 0.75 or need) then return end
 	if direct and target.chance < need * 0.65 and (target.damage or 0) < (target.health or 100) then return end
 	if direct and (target.walls or 0) > 0 and target.chance < need then return end
 	local delayList = type(config.delayShot) == "table" and config.delayShot or {}
 	local needDamage, needChance = table.find(delayList, "Damage"), table.find(delayList, "Hit Chance")
-	if needDamage or needChance then
+	if (needDamage or needChance) and not (fresh and target.chance >= need * 0.75) then
 		if Rage.stable < 3 then return end
 		if Rage.delayEntity ~= target.entity then Rage.delayEntity, Rage.delaySince = target.entity, os.clock() end
 		local ready = true
@@ -5063,7 +5163,7 @@ local function rageStep()
 	end
 
 	local streak = Rage.missStreak and Rage.missStreak[target.entity]
-	if streak and streak.n >= 2 and os.clock() - streak.t < 1.2 then
+	if streak and streak.n >= 2 and os.clock() - streak.t < 1.2 and not fresh then
 		if Rage.stable < 2 then return end
 	end
 
@@ -5077,7 +5177,7 @@ local function rageStep()
 			end
 			return
 		end
-		if os.clock() - (Rage.scopeAsked or 0) < (config.quickScope and 0.02 or 0.12) then return end
+		if os.clock() - (Rage.scopeAsked or 0) < ((config.quickScope or fresh) and 0.02 or 0.12) then return end
 		if config.quickStop and (Rage.selfSpeed or 0) > 4 then return end
 	end
 
@@ -5087,7 +5187,7 @@ local function rageStep()
 	local semiAuto = fireRate >= 0.3 or weapon.Properties.FireMode == "Semi" or weapon.Properties.ShootingOptions == "Semi"
 	local recentMiss = Rage.missStreak and Rage.missStreak[target.entity]
 	local cooling = (recentMiss and recentMiss.n >= 2 and os.clock() - recentMiss.t < 1.5) or os.clock() < (Rage.rapidCoolUntil or 0)
-	local rapidOk = (target.walls or 0) == 0 and target.chance >= need * 0.95 and (target.distance or 0) < 110 and Rage.stable >= 3
+	local rapidOk = not fresh and (target.walls or 0) == 0 and target.chance >= math.min(need + 5, 97) and (target.distance or 0) < 80 and lateral < 10 and Rage.stable >= 6 and Rage.accuracyBonus() <= 4
 	local multiplier = (config.rapidFire and not semiAuto and not cooling and rapidOk) and math.max(Rage.rapidMultiplier(config, fireRate, weapon.Name), 1) or 1
 	local cadence = math.max(fireRate / multiplier + 0.012, 0.055)
 	if now - lastShot < cadence then return end
@@ -5363,6 +5463,28 @@ function Neverlose.onStairs(self)
 	return Neverlose.stairNow
 end
 
+local function applyPitch(settings, frame)
+	local pitch = settings.pitch
+	if pitch == "Up" then
+		frame.VerticalLook = 1
+	elseif pitch == "Down" then
+		frame.VerticalLook = -1
+	elseif pitch == "Zero" then
+		frame.VerticalLook = 0
+	elseif pitch == "Custom" then
+		frame.VerticalLook = math.clamp((settings.pitchValue or 0) / 100, -1, 1)
+	elseif pitch == "Random" then
+		frame.VerticalLook = math.random(-100, 100) / 100
+	elseif pitch == "Jitter" then
+		AntiAim.pitchTick += 1
+		if AntiAim.pitchTick >= math.max(settings.jitterDelay or 1, 1) then
+			AntiAim.pitchTick = 0
+			AntiAim.pitchSide = -AntiAim.pitchSide
+		end
+		frame.VerticalLook = AntiAim.pitchSide
+	end
+end
+
 Input.add(50, function(self, frame)
 	local config = Neverlose.config.aa
 	if not config.enabled or World.freeActive then return end
@@ -5373,7 +5495,10 @@ Input.add(50, function(self, frame)
 	local shotNow = config.disableOnShot and (shooting or os.clock() - AntiAim.lastShotAt < 0.15)
 	if weapon and weapon.Name and GRENADES[weapon.Name] then AntiAim.grenadeUntil = os.clock() + 0.9 return end
 	if os.clock() < (AntiAim.grenadeUntil or 0) then return end
-	if Neverlose.onStairs(self) then return end
+	if Neverlose.onStairs(self) then
+		applyPitch(config.useBuilder and config.states[aaState(self, frame)] or config, frame)
+		return
+	end
 
 	local root = self.HumanoidRootPart
 	local viewYaw = frame.LookYaw
@@ -5445,25 +5570,7 @@ Input.add(50, function(self, frame)
 		frame.LookYaw = yaw
 	end
 
-	local pitch = settings.pitch
-	if pitch == "Up" then
-		frame.VerticalLook = 1
-	elseif pitch == "Down" then
-		frame.VerticalLook = -1
-	elseif pitch == "Zero" then
-		frame.VerticalLook = 0
-	elseif pitch == "Custom" then
-		frame.VerticalLook = math.clamp((settings.pitchValue or 0) / 100, -1, 1)
-	elseif pitch == "Random" then
-		frame.VerticalLook = math.random(-100, 100) / 100
-	elseif pitch == "Jitter" then
-		AntiAim.pitchTick += 1
-		if AntiAim.pitchTick >= math.max(settings.jitterDelay or 1, 1) then
-			AntiAim.pitchTick = 0
-			AntiAim.pitchSide = -AntiAim.pitchSide
-		end
-		frame.VerticalLook = AntiAim.pitchSide
-	end
+	applyPitch(settings, frame)
 end)
 
 do
@@ -6990,7 +7097,7 @@ function EspObject:applyChams(character, visible, walls, glow, forceColor, inSig
 		local fillT = math.min(style.fill + (style.pulse and 0.16 * breath or 0), 1)
 		if style.material then fillT = 1 end
 		back.FillColor, back.FillTransparency = color, fillT
-		back.OutlineColor = color:Lerp(Color3.new(1, 1, 1), style.rim or 0.35)
+		back.OutlineColor = sighted and color:Lerp(Color3.new(1, 1, 1), style.rim or 0.35) or color
 		back.OutlineTransparency = math.max(style.outline - 0.05, 0)
 		back.Enabled = true
 	else
@@ -7363,8 +7470,8 @@ function EspObject:drawSharpBox(position, size, thick, outlineColor, color, halo
 	local rects = self.edgeRects
 	if not rects then
 		rects = {}
-		for index = 1, 12 do
-			local layer = index <= 4 and 2 or (index <= 8 and 3 or 1)
+		for index = 1, 16 do
+			local layer = index <= 4 and 2 or (index <= 8 and 3 or (index <= 12 and 1 or 2))
 			local rect = draw("Square", { Filled = true, Transparency = 1, Visible = false, ZIndex = layer })
 			rects[index] = rect
 			self.barObjects[#self.barObjects + 1] = rect
@@ -7383,7 +7490,13 @@ function EspObject:drawSharpBox(position, size, thick, outlineColor, color, halo
 			rect.Position, rect.Size, rect.Color, rect.Transparency, rect.Visible = Vector2.new(part[1], part[2]), Vector2.new(part[3], part[4]), tint, alpha or 1, true
 		end
 	end
-	ring(1, position.X - 1, position.Y - 1, size.X + 2, size.Y + 2, thick + 2, outlineColor)
+	-- The outline only ever sits outside and inside the box ring, never over it.
+	ring(1, position.X - 1, position.Y - 1, size.X + 2, size.Y + 2, 1, outlineColor)
+	if size.X - 2 * thick > 3 and size.Y - 2 * thick > 3 then
+		ring(13, position.X + thick, position.Y + thick, size.X - 2 * thick, size.Y - 2 * thick, 1, outlineColor)
+	else
+		ring(13, 0, 0, 0, 0, 1, nil)
+	end
 	ring(5, position.X, position.Y, size.X, size.Y, thick, color)
 	ring(9, position.X - 3, position.Y - 3, size.X + 6, size.Y + 6, 6, haloColor, haloAlpha)
 end
@@ -7756,7 +7869,7 @@ function EspObject:drawReferenceBox(x, y, w, h, colors, boxColor, thickness, rou
 			return frame, stroke
 		end
 		local shadowFrame, shadowStroke = framed(1, Color3.new())
-		shadowFrame.Position = UDim2.fromOffset(1, 1)
+		shadowFrame.Position, shadowFrame.Size = UDim2.fromOffset(-1, -1), UDim2.new(1, 2, 1, 2)
 		local boxFrame, boxStroke = framed(2, Color3.new(1, 1, 1))
 		local gradient = newInstance("UIGradient", { Enabled = false }, boxStroke)
 		local shadowCorner = newInstance("UICorner", { CornerRadius = UDim.new(0, 0) }, shadowFrame)
@@ -7780,9 +7893,9 @@ function EspObject:drawReferenceBox(x, y, w, h, colors, boxColor, thickness, rou
 
 	kit.holder.Position, kit.holder.Size, kit.holder.Visible = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h), true
 	kit.shadowFrame.Visible = colors.outline ~= false
-	kit.boxStroke.Thickness, kit.shadowStroke.Thickness = thickness, thickness
+	kit.boxStroke.Thickness, kit.shadowStroke.Thickness = thickness, 1
 	round = math.clamp(math.floor(round or 0), 0, 40)
-	kit.boxCorner.CornerRadius, kit.shadowCorner.CornerRadius, kit.fillCorner.CornerRadius = UDim.new(0, round), UDim.new(0, round), UDim.new(0, round)
+	kit.boxCorner.CornerRadius, kit.shadowCorner.CornerRadius, kit.fillCorner.CornerRadius = UDim.new(0, round), UDim.new(0, round > 0 and round + 1 or 0), UDim.new(0, round)
 	kit.boxStroke.LineJoinMode = round > 0 and Enum.LineJoinMode.Round or Enum.LineJoinMode.Miter
 	kit.shadowStroke.LineJoinMode = kit.boxStroke.LineJoinMode
 	if fillSpec then
@@ -7836,6 +7949,7 @@ local function silhouettePart(part)
 	if not part:IsA("BasePart") then return false end
 	local name = part.Name:lower()
 	if name == "humanoidrootpart" or name:find("hitbox", 1, true) then return false end
+	if part.Transparency >= 0.99 and math.max(part.Size.X, part.Size.Y, part.Size.Z) > 4 then return false end
 	if part:FindFirstAncestorOfClass("Tool") or part:FindFirstAncestorOfClass("Accessory") then return false end
 	return true
 end
@@ -8247,7 +8361,7 @@ function EspObject:update(delta)
 			self.ghostSource, self.ghostClone = character, Neverlose.makeGhostClone(character)
 		end
 		if self.ghostClone then
-			self:applyChams(self.ghostClone, model.player, model.walls, model.glow, nil, false)
+			self:applyChams(self.ghostClone, model.player, model.walls, model.glow, nil, true)
 		else
 			self:hideHighlights()
 		end
@@ -8320,9 +8434,12 @@ function EspObject:update(delta)
 	local width = height * 0.55
 	local position = Vector2.new(rootPoint.X - width / 2, top.Y)
 	local size = Vector2.new(width, height)
+	local refWidth, refHeight, refX = width, height, rootPoint.X
 
 	if colors.tightBox ~= false then
 		local x0, y0, x1, y1 = self:tightBox(character)
+		-- A stray part (held item, huge mesh) must not blow the box up: fall back to the head-to-feet box.
+		if x0 and (y1 - y0 > refHeight * 1.5 or x1 - x0 > math.max(refWidth * 2, refHeight)) then x0 = nil end
 		if x0 and x1 - x0 > 2 and y1 - y0 > 2 then
 			position = Vector2.new(math.floor(x0), math.floor(y0))
 			width, height = math.floor(x1 - x0), math.floor(y1 - y0)
@@ -8369,10 +8486,10 @@ function EspObject:update(delta)
 	if colors.fixedBox ~= true then
 		local minWidth = math.clamp(tonumber(colors.minWidth) or 18, 0, 200)
 		local minHeight = math.clamp(tonumber(colors.minHeight) or 36, 0, 400)
-		local grow = math.max(minWidth / math.max(width, 0.001), minHeight / math.max(height, 0.001))
-		if grow > 1 then
+		local grow = math.clamp(minHeight / math.max(height, 0.001), 1, 1.2)
+		if grow > 1 or width < minWidth then
 			local midX, midY = position.X + width / 2, position.Y + height / 2
-			width, height = width * grow, height * grow
+			width, height = math.min(math.max(width * grow, minWidth), height * grow * 0.7), height * grow
 			position = Vector2.new(midX - width / 2, midY - height / 2)
 			size = Vector2.new(width, height)
 			top = Vector3.new(rootPoint.X, position.Y, top.Z)
@@ -9560,10 +9677,12 @@ do
 					local height = math.max(math.abs(foot.Y - top.Y), 8)
 					local width = height * 0.5
 					local fade = 1 - math.clamp(age / esp.lastSeenTime, 0, 1) * 0.75
-					Neverlose.styleBox(draw, Vector2.new(foot.X - width / 2, top.Y), Vector2.new(width, height), esp.lastSeenColor, fade)
+					local seenColors = esp.colors.Enemies
+					width = height * 0.55
+					Neverlose.styleBox(draw, Vector2.new(foot.X - width / 2, top.Y), Vector2.new(width, height), seenColors.box, fade)
 					draw.text.Text = ("%s  %.1fs ago  %dm"):format(tostring(entity.DisplayName or entity.Name), age, (info.position - cameraPosition).Magnitude * STUDS_PER_METER)
 					draw.text.Position = Vector2.new(foot.X, top.Y - 15)
-					draw.text.Color, draw.text.Transparency, draw.text.Visible = esp.lastSeenColor, fade, true
+					draw.text.Color, draw.text.Transparency, draw.text.Visible = seenColors.name, fade, true
 				end
 			end
 
@@ -10169,10 +10288,10 @@ function Preview.update()
 		if cfg.fixedBox ~= true then
 			local minWidth = math.clamp(tonumber(cfg.minWidth) or 18, 0, 200)
 			local minHeight = math.clamp(tonumber(cfg.minHeight) or 36, 0, 400)
-			local grow = math.max(minWidth / math.max(boxSize.X, 0.001), minHeight / math.max(boxSize.Y, 0.001))
-			if grow > 1 then
+			local grow = math.clamp(minHeight / math.max(boxSize.Y, 0.001), 1, 1.2)
+			if grow > 1 or boxSize.X < minWidth then
 				local midX, midY = position.X + boxSize.X / 2, position.Y + boxSize.Y / 2
-				boxSize = Vector2.new(boxSize.X * grow, boxSize.Y * grow)
+				boxSize = Vector2.new(math.max(boxSize.X * grow, minWidth), boxSize.Y * grow)
 				position = Vector2.new(midX - boxSize.X / 2, midY - boxSize.Y / 2)
 			end
 		end
@@ -10198,12 +10317,11 @@ function Preview.update()
 		position = Vector2.new(math.floor(position.X / cell + 0.5) * cell, math.floor(position.Y / cell + 0.5) * cell)
 		boxSize = Vector2.new(math.max(math.floor(boxSize.X / cell + 0.5), 8) * cell, math.max(math.floor(boxSize.Y / cell + 0.5), 10) * cell)
 	end
-	for _, element in ipairs({ ui.box, ui.boxOutline }) do
-		element.Position, element.Size = UDim2.fromOffset(position.X, position.Y), UDim2.fromOffset(boxSize.X, boxSize.Y)
-	end
+	ui.box.Position, ui.box.Size = UDim2.fromOffset(position.X, position.Y), UDim2.fromOffset(boxSize.X, boxSize.Y)
+	ui.boxOutline.Position, ui.boxOutline.Size = UDim2.fromOffset(position.X - 1, position.Y - 1), UDim2.fromOffset(boxSize.X + 2, boxSize.Y + 2)
 	ui.boxOutline.Visible = plain and (colors.outline or classicBox) and not referenceBox
 	ui.outlineStroke.Color = colors.outlineColor
-	ui.outlineStroke.Thickness = cell + 2
+	ui.outlineStroke.Thickness = cell + 1
 	ui.boxStroke.Color = boxColor
 	ui.boxStroke.Thickness = pixelBox and cell + 1 or cell
 	ui.boxStroke.Transparency = (referenceBox and boxRadius == 0) and 0.65 or 0
@@ -12461,13 +12579,19 @@ do
 			radarFrame = ok and frame or nil
 		end
 		if radarFrame then
+			-- The stock radar is left completely alone at the default size.
+			local factor = hud.radar ~= false and math.clamp((hud.radarScale or 100) / 100, 0.5, 2) or 1
 			local scaler = radarFrame:FindFirstChild("NLScale")
-			if not scaler then
-				scaler = Instance.new("UIScale")
-				scaler.Name = "NLScale"
-				scaler.Parent = radarFrame
+			if math.abs(factor - 1) < 0.01 then
+				if scaler then scaler:Destroy() end
+			else
+				if not scaler then
+					scaler = Instance.new("UIScale")
+					scaler.Name = "NLScale"
+					scaler.Parent = radarFrame
+				end
+				scaler.Scale = factor
 			end
-						scaler.Scale = hud.radar ~= false and math.clamp((hud.radarSize or 100) / 100, 0.5, 2) or 1
 		end
 		if hud.scoreboard and os.clock() - lastBoard > 0.4 and not Game.isChatting() then
 			lastBoard = os.clock()
@@ -12724,7 +12848,7 @@ do
 	local function iconObject(holder, key, order)
 		local object = holder:FindFirstChild(key)
 		if object then return object end
-		return newInstance("ImageLabel", { Name = key, LayoutOrder = order, Size = UDim2.fromOffset(ICON_H * 2, ICON_H), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit }, holder)
+		return newInstance("ImageLabel", { Name = key, LayoutOrder = order, Size = UDim2.fromOffset(ICON_H * 2, ICON_H), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit, ZIndex = holder.ZIndex + 1 }, holder)
 	end
 
 	local function textObject(holder, key, order)
@@ -12732,7 +12856,7 @@ do
 		if object then return object end
 		return newInstance("TextLabel", {
 			Name = key, LayoutOrder = order, Size = UDim2.fromOffset(0, ICON_H), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
-			Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = Color3.new(1, 1, 1),
+			Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = Color3.new(1, 1, 1), ZIndex = holder.ZIndex + 1,
 		}, holder)
 	end
 
@@ -12740,10 +12864,11 @@ do
 		local holder = label:FindFirstChild("NLGear")
 		if holder then return holder end
 		holder = newInstance("Frame", {
-			Name = "NLGear", BackgroundColor3 = Color3.fromRGB(12, 12, 16), BackgroundTransparency = 0.35, BorderSizePixel = 0,
-			Size = UDim2.fromOffset(0, ICON_H + 4), AutomaticSize = Enum.AutomaticSize.X, ZIndex = label.ZIndex + 1,
+			Name = "NLGear", BackgroundColor3 = Color3.fromRGB(10, 10, 14), BackgroundTransparency = 1, BorderSizePixel = 0,
+			Size = UDim2.fromOffset(0, ICON_H + 4), AutomaticSize = Enum.AutomaticSize.X, ZIndex = label.ZIndex + 20,
 		}, label)
 		newInstance("UICorner", { CornerRadius = UDim.new(0, 4) }, holder)
+		newInstance("UIStroke", { Color = Color3.fromRGB(70, 70, 86), Transparency = 0.5, Thickness = 1 }, holder)
 		newInstance("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4) }, holder)
 		newInstance("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder }, holder)
 		newInstance("UIScale", {}, holder)
@@ -13082,6 +13207,7 @@ do
 		local speed = flat.Magnitude
 		if not config or speed < 2 then return false end
 		if keyX == 0 and keyZ == 0 then return false end
+		if speed >= (Neverlose.config.movement.strafeMax or 262) then return true end
 
 		local wishYaw = wrapAngle(frame.LookYaw + math.atan2(-keyX, -keyZ))
 		local velocityYaw = math.atan2(-velocity.X, -velocity.Z)
@@ -13123,9 +13249,7 @@ do
 		local moveYaw = velocityYaw + optimal * side
 		local world = Vector3.new(-math.sin(moveYaw), 0, -math.cos(moveYaw))
 		local relative = CFrame.Angles(0, frame.LookYaw, 0):VectorToObjectSpace(world)
-		local strength = Neverlose.config.movement.strafeStrength / 100
-		local target = Vector2.new(math.clamp(relative.X, -1, 1), math.clamp(relative.Z, -1, 1))
-		frame.Move = frame.Move:Lerp(target, strength)
+		frame.Move = Vector2.new(math.clamp(relative.X, -1, 1), math.clamp(relative.Z, -1, 1))
 		return true
 	end
 
@@ -13355,7 +13479,7 @@ do
 
 	local CATEGORIES = { "Pistols", "Mid Tier", "Rifles", "Grenades" }
 	local ALIASES = {
-		Glock = "Glock-18", USP = "USP-S", Deagle = "Desert Eagle",
+		Glock = "Glock-18", USP = "USP-S", Deagle = "Desert Eagle", Revolver = "R8 Revolver",
 	}
 	local GROUPS = {
 		{ "AK-47", "M4A1-S", "M4A4" }, { "Glock-18", "USP-S", "P2000" },
@@ -16607,7 +16731,7 @@ function Menu.visuals(window, hk)
 	hk["Radar"] = worldHud:AddToggle("Radar", hud.radar, set(hud, "radar"))
 
 	local radarSettings = hk["Radar"]:AddSettings()
-	radarSettings:AddSlider("Radar Size", 50, 200, hud.radarSize or 100, set(hud, "radarSize"), "%")
+	radarSettings:AddSlider("Radar Scale", 50, 200, 100, set(hud, "radarScale"), "%")
 	local overlayMode = world.removeOverlay and "None" or (world.scopeLines and "Lines" or "Default")
 	local overlayControl = worldHud:AddDropdownColorpicker("Scope Overlay", { "Default", "Lines", "None" }, world.scopeColor, function(option)
 		world.removeOverlay = option == "None"
@@ -16665,7 +16789,6 @@ function Menu.visuals(window, hk)
 	local eventLogs = windows:AddToggle("Event Logs", true, function(v) window:SetEventLogs({ enabled = v }) end):AddSettings()
 	eventLogs:AddColorpicker("Hit Text", misc.hitlogTextColor, setColor(misc, "hitlogTextColor"))
 	eventLogs:AddColorpicker("Hit Accent", misc.hitlogColor, setColor(misc, "hitlogColor"))
-	eventLogs:AddToggle("Custom Hit Icon", misc.hitlogIcon ~= false, set(misc, "hitlogIcon"))
 	eventLogs:AddToggle("Hide Icons", false, function(v) window:SetEventLogs({ hideIcons = v }) end)
 	eventLogs:AddToggle("Reduce Motion", false, function(v) window:SetEventLogs({ reduceMotion = v }) end)
 	eventLogs:AddDropdown("Position", { "Top Left", "Crosshair" }, "Top Left", function(v) window:SetEventLogs({ positionPreset = v }) end)
@@ -16830,6 +16953,9 @@ function Menu.aimbot(window, hk)
 	if rage.priority ~= "Health" then rage.priority = "Distance" end
 	RageSettings:AddDropdown("Priority", { "Distance", "Health" }, rage.priority, set(rage, "priority"))
 	RageSettings:AddSlider("Scan Rate", 5, 60, rage.scanHz, set(rage, "scanHz"), " Hz")
+	RageSettings:AddDropdown("Scan Mode", { "Balanced", "Performance" }, rage.scanMode or "Balanced", set(rage, "scanMode"))
+	RageSettings:AddToggle("Sticky Target", rage.stickyTarget, set(rage, "stickyTarget"))
+	RageSettings:AddSlider("Max Distance", 0, 500, rage.maxDist, set(rage, "maxDist"), " st"):SetDisplay(function(v) return v == 0 and "any" or nil end)
 	tip(RageMain:AddDropdown("Target", { "Highest Damage", "Closest", "Lowest Health", "Crosshair" }, rage.target, set(rage, "target")), "How the best enemy is picked")
 	RageMain:AddSlider("Field of View", 1, 180, rage.fov, set(rage, "fov"), "°")
 	local Silent = RageMain:AddToggle("Silent Aim", rage.silent, set(rage, "silent"))
@@ -16843,8 +16969,11 @@ function Menu.aimbot(window, hk)
 	end)
 	SilentSettings:AddDropdown("Hitbox", { "Head", "Chest", "Stomach", "Nearest" }, rage.silentHitbox, set(rage, "silentHitbox"))
 	hk["Automatic Fire"] = RageMain:AddToggle("Automatic Fire", rage.autoFire, set(rage, "autoFire"))
+	local FireSettings = hk["Automatic Fire"]:AddSettings()
+	tip(FireSettings:AddToggle("Quick Stop", rage.quickStop, set(rage, "quickStop")), "Stops your movement the moment a shot is about to be fired")
+	tip(FireSettings:AddToggle("Quick Scope", rage.quickScope, set(rage, "quickScope")), "Snipers fire right after the scope opens")
 	local OriginSettings = RageMain:AddToggle("Origin Scan", rage.originScan, set(rage, "originScan")):AddSettings()
-	OriginSettings:AddSlider("Range", 1, 12, rage.originRange, set(rage, "originRange"), " st")
+	OriginSettings:AddSlider("Range", 1, 9.3, math.clamp(rage.originRange or 2, 1, 9.3), set(rage, "originRange"), " st")
 	OriginSettings:AddSlider("Scans", 1, 12, rage.originScans or 4, set(rage, "originScans"))
 	OriginSettings:AddDropdown("Mode", { "default", "optimized", "precise" }, rage.originScanMode or "optimized", set(rage, "originScanMode"))
 	tip(OriginSettings:AddToggle("Debug Model", rage.originDebug, set(rage, "originDebug")), "Shows the real shot origin, the scanned point and where the last bullet left from")
@@ -16860,9 +16989,11 @@ function Menu.aimbot(window, hk)
 		if writefile then pcall(writefile, "nev_origin_probe.txt", text) end
 		Logs.push("Combat", "origin probe copied · nev_origin_probe.txt")
 	end)
-	RageMain:AddSlider("Max Walls", 0, 3, rage.maxWalls, set(rage, "maxWalls"), " w")
-	tip(RageMain:AddToggle("Aim Through Walls", rage.autowall, set(rage, "autowall")), "Capped at what the weapon really penetrates")
-	RageMain:AddSlider("Wall Min Damage", 0, 100, rage.wallMinDamage, set(rage, "wallMinDamage")):SetDisplay(function(v) return v == 0 and "any" or nil end)
+	local Walls = RageMain:AddToggle("Aim Through Walls", rage.autowall, set(rage, "autowall"))
+	tip(Walls, "Capped at what the weapon really penetrates")
+	local WallSettings = Walls:AddSettings()
+	WallSettings:AddSlider("Max Walls", 0, 3, rage.maxWalls, set(rage, "maxWalls"), " w")
+	WallSettings:AddSlider("Min Damage", 0, 100, rage.wallMinDamage, set(rage, "wallMinDamage")):SetDisplay(function(v) return v == 0 and "any" or nil end)
 
 	local RageSelection = RageTab:AddSection("Selection", "left")
 	RageSelection:AddDropdown("Hitboxes", { "Head", "Chest", "Stomach", "Arms", "Hands", "Legs", "Feet" }, rage.hitboxList, function(list) rage.hitboxList = list end)
@@ -16877,14 +17008,15 @@ function Menu.aimbot(window, hk)
 	local Override = RageSelection:AddToggle("Min Damage Override", rage.minDmgOverride, set(rage, "minDmgOverride"))
 	hk["Min Damage Override"] = Override
 	Override:AddSettings():AddSlider("Override Damage", 1, 100, rage.minDmgOverrideValue, set(rage, "minDmgOverrideValue"))
+	tip(RageSelection:AddToggle("Force Body", rage.forceBody, set(rage, "forceBody")), "Skips the head hitbox")
+	local MissBody = RageSelection:AddToggle("Body After Misses", rage.missToBody, set(rage, "missToBody"))
+	tip(MissBody, "Body only after the set number of misses on that enemy")
+	MissBody:AddSettings():AddSlider("Misses", 1, 6, rage.missesToBody, set(rage, "missesToBody"))
 	local Multi = RageSelection:AddToggle("Multi-Target", rage.multiTarget, set(rage, "multiTarget"))
 	tip(Multi, "Every visible enemy gets a share of the bullets (direct shots)")
 	local multiMore = Multi:AddSettings()
 	multiMore:AddToggle("Prefer Body When Lethal", rage.preferBodyLethal, set(rage, "preferBodyLethal"))
 	multiMore:AddToggle("Prefer Head", rage.preferHead, set(rage, "preferHead"))
-	local QuickStop = RageSelection:AddToggle("Quick Stop", rage.quickStop, set(rage, "quickStop"))
-	tip(QuickStop, "Stops your movement the moment a shot is about to be fired")
-	tip(RageSelection:AddToggle("Quick Scope", rage.quickScope, set(rage, "quickScope")), "Snipers fire right after the scope opens")
 
 	local RageOther = RageTab:AddSection("Other", "right")
 	tip(RageOther:AddDropdown("History", { "Off", "Low", "Medium", "High" }, rage.history, set(rage, "history")), "Backtrack into old positions (client-hit servers only)")
@@ -17224,6 +17356,7 @@ function Menu.misc(window, hk)
 	airStrafeSettings:AddToggle("Only While Holding Jump", movement.strafeHoldJump, set(movement, "strafeHoldJump"))
 	airStrafeSettings:AddToggle("Stop on Shift Key", movement.strafeStopShift, set(movement, "strafeStopShift"))
 	airStrafeSettings:AddSlider("Turn Speed", 0, 100, movement.strafeStrength, set(movement, "strafeStrength"), "%")
+	airStrafeSettings:AddSlider("Max Speed", 20, 262, movement.strafeMax or 262, set(movement, "strafeMax"), "")
 	airStrafeSettings:AddToggle("Auto Direction", movement.autoDirection, set(movement, "autoDirection"))
 	airStrafeSettings:AddSlider("Align Threshold", 1, 30, movement.alignDeg, set(movement, "alignDeg"), "°")
 	local jumpBug = move:AddToggle("Jump Bug", movement.jumpBug, set(movement, "jumpBug"))
@@ -17827,7 +17960,12 @@ function Menu.inventory(window)
 			local world = Instance.new("WorldModel")
 			world.Parent = view
 			for _, object in ipairs(copy:GetDescendants()) do
-				if object:IsA("BasePart") then object.Anchored = true elseif object:IsA("LuaSourceContainer") then object:Destroy() end
+				local label = object.Name:lower()
+				if object:IsA("BasePart") and (label:find("outline") or label:find("hull") or label:find("shell") or label:find("border")) then
+					object:Destroy()
+				elseif object:IsA("BasePart") then object.Anchored = true
+				elseif object:IsA("LuaSourceContainer") or object:IsA("Highlight") or object:IsA("SelectionBox") or object:IsA("ForceField")
+					or object:IsA("BillboardGui") or object:IsA("SurfaceGui") or object:IsA("UIStroke") or object:IsA("ParticleEmitter") then object:Destroy() end
 			end
 			copy.Parent = world
 			pcall(function() copy:PivotTo(CFrame.Angles(0, math.pi, 0)) end)

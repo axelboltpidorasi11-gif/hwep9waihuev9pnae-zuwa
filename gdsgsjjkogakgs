@@ -199,11 +199,11 @@ Neverlose.config = {
 	rage = {
 		enabled = false, fov = 180, priority = "Distance", showFov = false, delayWait = { "Hit Chance" }, delayDamage = 50, delayChance = 60, delayMax = 400,
 		silent = false, silentAuto = true, silentHitChance = 100, silentHitbox = "Head",
-		autoFire = false, autowall = false, wallMinDamage = 25,
+		autoFire = false, autowall = false, wallMinDamage = 0,
 		target = "Highest Damage", hitboxes = "Head, Chest, Stomach", multipoint = "Head, Chest, Stomach",
 		hitChance = 50, minDamage = 15, quickStop = false, quickScope = false,
 		history = "High", bodyAfterMiss = true, autoHitChance = true, delayShot = {}, noRecoil = false, recoilReduction = 100, noSpread = false,
-		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 2, originScans = 4, originScanMode = "optimized", originDebug = false, originModel = "Saturn", maxWalls = 2, peekReturn = "Shot",
+		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 8, originScans = 4, originScanMode = "optimized", originDebug = false, originModel = "Saturn", maxWalls = 2, peekReturn = "Shot",
 		preferBodyLethal = false, preferHead = true, scanMode = "Balanced", stickyTarget = false, forceBody = false, missToBody = false, missesToBody = 2, maxDist = 0, multiTarget = false, scanHz = 30, minDmgOverride = false, minDmgOverrideValue = 5,
 		autoReload = false, reloadAt = 1, remoteReload = false, instaReload = false, reloadSpeed = 3,
 		hitboxList = { "Head", "Chest", "Stomach" }, multipointList = { "Head", "Chest" },
@@ -229,7 +229,7 @@ Neverlose.config = {
 	esp = {
 		enabled = false, maxDistance = 1000, boxStyle = "Reference", showTeam = false, neonIntensity = 4, neonHalo = 18,
 		arrows = false, arrowColor = rgb(255, 255, 255), sounds = false, soundColor = rgb(90, 200, 255),
-		heardPlayers = true, wallBoost = 60, lastSeen = true, lastSeenTime = 10, lastSeenColor = rgb(255, 190, 90), trail = false, soundKinds = "All", soundStyle = "Chams", soundDuration = 2, soundDistance = 700, soundLabels = true, soundTeam = false,
+		heardPlayers = true, wallBoost = 60, realPos = true, realPosColor = rgb(255, 60, 60), lastSeen = true, lastSeenTime = 10, lastSeenColor = rgb(255, 190, 90), trail = false, soundKinds = "All", soundStyle = "Chams", soundDuration = 2, soundDistance = 700, soundLabels = true, soundTeam = false,
 		soundLinger = 2, soundRing = "Segmented", soundMaxRadius = 10, soundNeon = true, soundNeonColor = rgb(90, 200, 255), soundNeonPower = 60, soundNeonSize = 50,
 		legit = false, visCheck = false, visibleColor = rgb(80, 255, 120), hiddenColor = rgb(120, 150, 255), snapOrigin = "Bottom",
 		arrowRadius = 220, arrowSize = 14,
@@ -669,6 +669,17 @@ end
 
 local entityCache, entityStamp = {}, -1
 
+local zombieCache = setmetatable({}, { __mode = "k" })
+
+function Game.zombie(shell)
+	local wrapped = zombieCache[shell]
+	if wrapped then return wrapped end
+	wrapped = { IsZombie = true, IsBot = true, UserId = 0, Name = "zombie", DisplayName = "zombie", Character = shell, Parent = shell.Parent }
+	function wrapped.GetAttribute(_, name) return shell:GetAttribute(name) end
+	zombieCache[shell] = wrapped
+	return wrapped
+end
+
 function Game.entities()
 	local now = os.clock()
 	if now - entityStamp < 0.2 then return entityCache end
@@ -691,12 +702,34 @@ function Game.entities()
 		list = playersService:GetPlayers()
 	end
 
+	-- Horde mode: live zombie shells are targets too (donor entity list).
+	local shells = workspaceService:FindFirstChild("HordeShells")
+	if shells then
+		list = table.clone(list)
+		for _, shell in ipairs(shells:GetChildren()) do
+			if shell:IsA("Model") and shell:GetAttribute("HordeId") ~= nil and not shell:GetAttribute("Ragdolled") and shell:FindFirstChild("Head") then
+				list[#list + 1] = Game.zombie(shell)
+			end
+		end
+	end
+
 	entityCache = list
 	return list
 end
 
+local hordeAt, hordeShells = -1, nil
+local function hordeActive()
+	local now = os.clock()
+	if now - hordeAt > 0.2 or (hordeShells and not hordeShells.Parent) then
+		hordeAt, hordeShells = now, workspaceService:FindFirstChild("HordeShells")
+	end
+	return hordeShells ~= nil
+end
+
 function Game.isEnemy(entity, teamCheck)
 	if entity == localPlayer then return false end
+	if type(entity) == "table" and entity.IsZombie then return true end
+	if hordeActive() then return false end
 	if teamCheck == false or Game.isDeathmatch() then return true end
 	local team = entity:GetAttribute("Team")
 	return TEAM_NAMES[team] == true and team ~= localPlayer:GetAttribute("Team")
@@ -705,13 +738,11 @@ end
 function Game.character(entity)
 	local character = entity.Character
 	if typeof(character) ~= "Instance" or not character:IsDescendantOf(workspaceService) then return nil end
-	local dead = character:GetAttribute("Dead")
-	if dead == true or character:GetAttribute("Ragdolled") then return nil end
+	if character:GetAttribute("Dead") == true or character:GetAttribute("Ragdolled") then return nil end
 	local health = character:GetAttribute("Health")
-	if dead == nil and not (type(entity) == "table" and entity.IsBot and type(health) == "number") then return nil end
 	if type(health) == "number" and health <= 0 then return nil end
 	local root = character:FindFirstChild("HumanoidRootPart")
-	if not root or not root:IsA("BasePart") then return nil end
+	if not root or not root:IsA("BasePart") or not character:FindFirstChild("Head") then return nil end
 	return character
 end
 
@@ -739,12 +770,17 @@ function Game.ownerOf(instance)
 	return nil
 end
 
+local armorCache = setmetatable({}, { __mode = "k" })
 function Game.armor(character)
 	local raw = character and character:GetAttribute("Armor")
 	if type(raw) ~= "string" then return 0, false end
+	local hit = armorCache[character]
+	if hit and hit[1] == raw then return hit[2], hit[3] end
 	local ok, data = pcall(httpService.JSONDecode, httpService, raw)
 	if not ok or type(data) ~= "table" then return 0, false end
-	return tonumber(data.Health) or 0, type(data.Type) == "string" and data.Type:find("Helmet") ~= nil
+	local health, helmet = tonumber(data.Health) or 0, type(data.Type) == "string" and data.Type:find("Helmet") ~= nil
+	armorCache[character] = { raw, health, helmet }
+	return health, helmet
 end
 
 function Game.equipped(entity)
@@ -753,6 +789,18 @@ function Game.equipped(entity)
 	local ok, data = pcall(httpService.JSONDecode, httpService, raw)
 	if ok and type(data) == "table" then return data end
 	return { Name = raw }
+end
+
+local equippedCache = setmetatable({}, { __mode = "k" })
+-- Read-only view for the ESP: decoded once per change of the attribute, callers must not mutate it.
+function Game.equippedShared(entity)
+	local raw = entity:GetAttribute("CurrentEquipped")
+	if type(raw) ~= "string" or raw == "" then return nil end
+	local hit = equippedCache[entity]
+	if hit and hit[1] == raw then return hit[2] end
+	local data = Game.equipped(entity)
+	equippedCache[entity] = { raw, data }
+	return data
 end
 
 function Game.isSniper(weapon)
@@ -1017,7 +1065,53 @@ local function wallMaterial(part)
 	return part.Material
 end
 
+Ballistics.wallMaterial = wallMaterial
+-- Materials the server really refused to shoot through; each one is learned from a failed wall shot.
+Ballistics.matBlocked = {}
+-- Per-material share of the computed penetration the server really allows; learned from wall shot results.
+Ballistics.penScale = {}
+
+-- The game ships its own penetration code (ReplicatedStorage.Shared.Raycast); the server runs the same rules.
+-- Asking it directly tells us exactly which wall shots the server will let through.
+local oracleFn = type(Game.modules.raycast) == "table" and rawget(Game.modules.raycast, "castThroughDistance") or nil
+
+local function oracleTrace(origin, direction, range, character, maxWalls, pen)
+	if type(oracleFn) ~= "function" or not character then return nil end
+	local ok, list = pcall(oracleFn, origin, direction.Unit * range, pen, Ballistics.ignoreList(), character)
+	if not ok or type(list) ~= "table" then return nil end
+
+	local hits, seen, walls, reached = {}, {}, 0, false
+	for _, entry in ipairs(list) do
+		local instance = entry.instance
+		if typeof(instance) ~= "Instance" then break end
+		local isExit = seen[instance] == true
+		hits[#hits + 1] = {
+			Instance = instance, Position = entry.position, Normal = entry.normal,
+			Material = tostring(entry.material and entry.material.Name or entry.material), Exit = isExit,
+		}
+		if instance:IsDescendantOf(character) then reached = true break end
+		if not isExit then
+			seen[instance] = true
+			if not Ballistics.isGlass(instance) then walls += 1 end
+		end
+	end
+	if walls > maxWalls then reached = false end
+	return hits, reached, walls
+end
+
 function Ballistics.trace(origin, direction, range, targetCharacter, maxWalls, penetration)
+	local weapon = Game.weapon()
+	local pen = penetration or (weapon and weapon.Properties and weapon.Properties.Penetration) or 0
+	local hits, reached, walls = oracleTrace(origin, direction, range, targetCharacter, maxWalls or 0, pen)
+	if not hits then return Ballistics.traceLocal(origin, direction, range, targetCharacter, maxWalls, penetration) end
+	if walls == 0 or not reached then return hits, reached, walls end
+	-- A wall shot needs both the game's rules and the learned local thickness check to agree.
+	local lhits, lreached, lwalls = Ballistics.traceLocal(origin, direction, range, targetCharacter, maxWalls, penetration)
+	if reached and not lreached then return lhits, false, lwalls end
+	return hits, reached, walls
+end
+
+function Ballistics.traceLocal(origin, direction, range, targetCharacter, maxWalls, penetration)
 	traceParams.FilterDescendantsInstances = Ballistics.ignoreList()
 
 	local weapon = Game.weapon()
@@ -1067,12 +1161,12 @@ function Ballistics.trace(origin, direction, range, targetCharacter, maxWalls, p
 			if variant ~= "" and Ballistics.penVariants[variant] then
 				key, bonus = variant, 0
 			else
-				key = wallMaterial(back.Instance)
+				key = wallMaterial(part)
 				bonus = Ballistics.penBonus[key] or 0
 			end
 
 			spent[key] = (spent[key] or 0) + thickness
-			if spent[key] > penThreshold(bonus) + pen then return hits, false, walls end
+			if spent[key] > (penThreshold(bonus) + pen) * (Ballistics.penScale[key] or 0.75) then return hits, false, walls end
 
 			hits[#hits + 1] = toHit(back, true)
 			cursor = back.Position + dir * 0.001
@@ -1083,24 +1177,38 @@ function Ballistics.trace(origin, direction, range, targetCharacter, maxWalls, p
 end
 
 
-function Ballistics.wallResult(name, walls, accepted)
+function Ballistics.wallResult(name, walls, accepted, parts)
 	if not name or walls <= 0 then return end
+	for _, wallPart in ipairs(parts or {}) do
+		local ok, material = pcall(Ballistics.wallMaterial, wallPart)
+		if ok and material then
+			Ballistics.matBlocked[material] = nil
+			local current = Ballistics.penScale[material] or 0.75
+			Ballistics.penScale[material] = accepted and math.min(1, current + 0.04) or math.max(0.3, current - 0.1)
+		end
+	end
 	local key = name .. ":" .. walls
 	local st = Neverlose.stats or {}
 	Neverlose.stats = st
 	if accepted then
 		st.wallOk = (st.wallOk or 0) + 1
+		st.wallStreak = 0
 		Ballistics.wallFails[key] = 0
 		local learned = Ballistics.wallLimit[name]
 		if learned and walls > learned.limit then Ballistics.wallLimit[name] = nil end
 		return
 	end
 	st.wallFail = (st.wallFail or 0) + 1
+	st.wallStreak = (st.wallStreak or 0) + 1
+	if st.wallStreak >= 8 then
+		Ballistics.wallPause = os.clock() + 10
+		st.wallStreak = 0
+	end
 	Ballistics.wallFails[key] = (Ballistics.wallFails[key] or 0) + 1
 	-- Три отказа подряд по одному и тому же числу стен — только тогда это
 	-- похоже на серверный лимит, а не на разброс или бегущую цель. Раньше
 	-- хватало двух промахов, и автоволл душился на 45 секунд.
-	if Ballistics.wallFails[key] >= 2 then
+	if Ballistics.wallFails[key] >= 4 then
 		Ballistics.wallLimit[name] = { limit = math.max(walls - 1, 0), expires = os.clock() + 20 }
 		Ballistics.wallFails[key] = 0
 	end
@@ -1129,7 +1237,7 @@ function Ballistics.damage(properties, partName, distance, walls, character)
 
 	local damage = base * (properties.RangeModifier or 1) ^ math.max((distance / 0.075) / 500, 0)
 	if walls > 0 then
-		damage *= properties.WallbangMultiplier or 0.5
+		damage *= (properties.WallbangMultiplier or 0.5) ^ walls
 	end
 
 	local armor, helmet = Game.armor(character)
@@ -1150,6 +1258,8 @@ end
 
 function Ballistics.allowedWalls(weapon, enabled, cap)
 	if not enabled then return 0 end
+	-- Three wall shots in a row that the server did not take: pause wallbangs for a while.
+	if os.clock() < (Ballistics.wallPause or 0) then return 0 end
 	local config = Neverlose.config.rage
 	-- Сколько стен вообще считать, задаёт пользователь (Max Walls). Реальную
 	-- возможность пробития проверяет Ballistics.trace — по материалу, толщине
@@ -1164,7 +1274,6 @@ function Ballistics.allowedWalls(weapon, enabled, cap)
 	-- Живёт 20 секунд, чтобы одна неудачная серия не отключала автоволл на
 	-- весь матч, и восстанавливается первым же успешным пробитием.
 	local stats = Neverlose.stats or {}
-	if (stats.wallFail or 0) >= 4 and (stats.wallFail or 0) > (stats.wallOk or 0) * 2 then base = math.min(base, 1) end
 	local learned = weapon and Ballistics.wallLimit[weapon.Name]
 	if learned and os.clock() < learned.expires then return math.max(math.min(base, learned.limit), 0) end
 	return base
@@ -1193,6 +1302,7 @@ maid:give(runService.Heartbeat:Connect(function(delta)
 				velocities[entity] = (velocities[entity] or velocity):Lerp(velocity, 0.35)
 			end
 			lastRoots[entity] = root.Position
+			Ballistics.sample(entity, root.Position, now)
 
 			if keep > 0 then
 				local records = history[entity] or {}
@@ -1211,6 +1321,7 @@ maid:give(runService.Heartbeat:Connect(function(delta)
 			end
 		else
 			lastRoots[entity], velocities[entity], history[entity] = nil, nil, nil
+			Ballistics.samples[entity] = nil
 		end
 	end
 end))
@@ -1223,6 +1334,52 @@ end
 
 function Ballistics.velocity(entity)
 	return velocities[entity] or Vector3.zero
+end
+
+-- Ring buffer of replicated root positions (~0.3 s). A sample is stored only when the rig actually moved,
+-- so frames without a replication update add nothing.
+Ballistics.samples = setmetatable({}, { __mode = "k" })
+function Ballistics.sample(entity, position, now)
+	local ring = Ballistics.samples[entity]
+	if not ring then
+		ring = { head = 0, count = 0, ts = {}, ps = {} }
+		Ballistics.samples[entity] = ring
+	end
+	if ring.count > 0 then
+		local step = (position - ring.ps[ring.head]).Magnitude
+		if step < 0.02 then return end
+		if step > 10 then ring.count = 0 end
+	end
+	local head = ring.head % 32 + 1
+	ring.head, ring.ts[head], ring.ps[head] = head, now, position
+	ring.count = math.min(ring.count + 1, 32)
+end
+
+-- Horizontal velocity over the buffer window. Zero when the target stopped, reversed direction, or the
+-- numbers look like a teleport. The newer half wins when it is slower, so a stop is not overshot.
+function Ballistics.smoothVelocity(entity, position, now)
+	local ring = Ballistics.samples[entity]
+	if not ring or ring.count < 3 then return Vector3.zero end
+	local total, first = 0, nil
+	for back = 0, ring.count - 1 do
+		local index = (ring.head - 1 - back) % 32 + 1
+		if now - ring.ts[index] > 0.3 then break end
+		total += 1
+		first = index
+	end
+	if total < 3 then return Vector3.zero end
+	local mid = (first - 1 + total // 2) % 32 + 1
+	local t0, p0, tm, pm = ring.ts[first], ring.ps[first], ring.ts[mid], ring.ps[mid]
+	if now - t0 < 0.1 or now - tm < 0.04 then return Vector3.zero end
+
+	local newer = Vector3.new(position.X - pm.X, 0, position.Z - pm.Z) / (now - tm)
+	local older = newer
+	if tm - t0 > 0.03 then older = Vector3.new(pm.X - p0.X, 0, pm.Z - p0.Z) / (tm - t0) end
+	local newSpeed, oldSpeed = newer.Magnitude, older.Magnitude
+	if newSpeed < 3 or newSpeed > 40 or oldSpeed > 40 then return Vector3.zero end
+	if oldSpeed >= 3 and newer:Dot(older) / (newSpeed * oldSpeed) < 0.2 then return Vector3.zero end
+	if newSpeed <= oldSpeed then return newer end
+	return (newer + older) * 0.5
 end
 
 function Ballistics.points(part, enabled)
@@ -3081,6 +3238,59 @@ local function snapshot(character)
 	return cframes, sizes
 end
 
+-- Диагностика промахов (только учёт, на поведение выстрелов не влияет). Всё O(1) на выстрел,
+-- никаких проходов по данным каждый кадр; запись файла остаётся в logMiss как раньше.
+ShotTracker.PING_LABELS = { "<60", "60-120", "120-180", "180+" }
+
+function ShotTracker.pingBucket(ms)
+	if ms < 60 then return 1 elseif ms < 120 then return 2 elseif ms < 180 then return 3 end
+	return 4
+end
+
+---Снимает пинг / плечо лидирования / предикт / путь / время жизни цели в момент выстрела.
+function ShotTracker.stamp(shot, info, entity)
+	local rage = Neverlose.Rage
+	local now = os.clock()
+	shot.ping = (rage and rage.pingMs and tonumber(rage.pingMs())) or 0
+	local meta = rage and rage.shotMeta
+	if meta and now - meta.at < 0.5 then
+		shot.arm, shot.armFactor, shot.leadMag = meta.arm, meta.factor, meta.lead
+		shot.predicted, shot.predMag = meta.predicted, meta.predMag
+	end
+	shot.predOn = rage and rage.predictAim == true
+	if not info then shot.path = "manual"
+	elseif info.direct then shot.path = "direct"
+	elseif rage and now - (rage.clickAt or -1) < 0.3 then shot.path = "click"
+	else shot.path = "silent" end
+	local vis = rage and rage.visTrack
+	if vis and vis.entity == entity and now - vis.last < 0.3 then shot.seenMs = (now - vis.since) * 1000 end
+end
+
+---Короткий хвост для строки отчёта: пинг | лидирование | предикт | путь | время цели в кадре.
+function ShotTracker.tag(shot)
+	local lead = shot.arm and ("x%.1f #%d %.1fst"):format(shot.armFactor or 0, shot.arm, shot.leadMag or 0) or "-"
+	local pred = shot.predicted and ("yes %.1fst"):format(shot.predMag or 0) or (shot.predOn and "no(on)" or "off")
+	return ("ping %d | lead %s | pred %s | path %s | seen %s"):format(
+		math.floor((shot.ping or 0) + 0.5), lead, pred, tostring(shot.path or "?"), shot.seenMs and (math.floor(shot.seenMs + 0.5) .. "ms") or "-")
+end
+
+---Счётчики попаданий/выстрелов по ведрам пинга, плечу лидирования, пути и предикту.
+function ShotTracker.account(shot, hit)
+	local stats = Neverlose.stats or {}
+	Neverlose.stats = stats
+	local function bump(group, key)
+		local bucket = group[key]
+		if not bucket then bucket = { n = 0, h = 0 } group[key] = bucket end
+		bucket.n += 1
+		if hit then bucket.h += 1 end
+	end
+	stats.pingB, stats.leadB, stats.pathB, stats.predB = stats.pingB or {}, stats.leadB or {}, stats.pathB or {}, stats.predB or {}
+	bump(stats.pingB, ShotTracker.pingBucket(shot.ping or 0))
+	bump(stats.leadB, shot.arm or 0)
+	bump(stats.pathB, shot.path or "?")
+	bump(stats.predB, shot.predicted and "yes" or "no")
+end
+
 function ShotTracker.register(origin, direction, hits, range, tap, expect, info)
 	local last = hits[#hits]
 	local finish = last and last.Position or origin + direction * range
@@ -3130,6 +3340,7 @@ function ShotTracker.register(origin, direction, hits, range, tap, expect, info)
 				info = info, origin = origin, hitPos = finish,
 				pos0 = character and character:FindFirstChild("HumanoidRootPart") and character.HumanoidRootPart.Position or nil,
 			}
+			pcall(ShotTracker.stamp, ShotTracker.pending[enemyEntity], info, enemyEntity)
 		end
 
 		local onShot = Neverlose.config.esp.enemyModel.onShot
@@ -3164,6 +3375,7 @@ function ShotTracker.logMiss(entity, shot)
 		if rage and rage.recordShot then rage.recordShot(false) end
 		local stats = Neverlose.stats or {}
 		Neverlose.stats = stats
+		pcall(ShotTracker.account, shot, false)
 		stats.missBy = stats.missBy or {}
 		stats.missBy[reason] = (stats.missBy[reason] or 0) + 1
 		stats.missLog = stats.missLog or {}
@@ -3171,14 +3383,38 @@ function ShotTracker.logMiss(entity, shot)
 		table.insert(stats.missLog, ("%s | %s | %s | hc %s | %s st | walls %s | mode %s | shift %s | speed %s"):format(
 			tostring(shot.weapon), tostring(shot.part), reason, tostring(info.chance and math.floor(info.chance + 0.5)),
 			tostring(info.distance and math.floor(info.distance + 0.5)), tostring(shot.walls or 0), tostring(info.mode),
-			tostring(info.shiftMag and math.floor(info.shiftMag * 10 + 0.5) / 10), tostring(shot.speed and math.floor(shot.speed + 0.5))))
+			tostring(info.shiftMag and math.floor(info.shiftMag * 10 + 0.5) / 10), tostring(shot.speed and math.floor(shot.speed + 0.5))) .. (function()
+				local names = {}
+				for _, wallPart in ipairs(shot.wallParts or {}) do names[#names + 1] = tostring(wallPart.Material and wallPart.Material.Name) end
+				return #names > 0 and (" | wall " .. table.concat(names, ",")) or ""
+			end)() .. " | " .. ShotTracker.tag(shot))
 		if #stats.missLog > 60 then table.remove(stats.missLog, 1) end
 		if writefile then
 			local lines = { "misses by reason:" }
 			for key, count in pairs(stats.missBy) do lines[#lines + 1] = ("  %s: %d"):format(key, count) end
-			lines[#lines + 1] = ("hits: %d  shots: %d"):format((stats.hitCount or 0), stats.shots or 0)
-			lines[#lines + 1] = "last misses (weapon | part | reason | hit chance | distance | walls | mode | origin shift | target speed):"
+			lines[#lines + 1] = ("hits: %d  shots fired: %d  attempts: %d  refused before click: %d"):format((stats.hitCount or 0), stats.shots or 0, stats.attempts or 0, stats.refused or 0)
+			for index, factor in ipairs(rage and rage.leadArms or {}) do
+				local st = rage.leadStats[index]
+				lines[#lines + 1] = ("lead x%.1f: %s/%s hits"):format(factor, st and tostring(st.h) or "0", st and tostring(st.n) or "0")
+			end
+			lines[#lines + 1] = ("origin cap: %s  wall ok/fail: %d/%d"):format(tostring(rage and rage.shiftCap), stats.wallOk or 0, stats.wallFail or 0)
+			local function ratio(bucket)
+				if not bucket or bucket.n == 0 then return "0/0" end
+				return ("%d/%d (%d%%)"):format(bucket.h, bucket.n, math.floor(bucket.h / bucket.n * 100 + 0.5))
+			end
+			local parts = {}
+			for index, label in ipairs(ShotTracker.PING_LABELS) do parts[#parts + 1] = ("%s ms: %s"):format(label, ratio(stats.pingB and stats.pingB[index])) end
+			lines[#lines + 1] = "hits/shots by ping: " .. table.concat(parts, " | ")
+			parts = { "none: " .. ratio(stats.leadB and stats.leadB[0]) }
+			for index, factor in ipairs(rage and rage.leadArms or {}) do parts[#parts + 1] = ("#%d x%.1f: %s"):format(index, factor, ratio(stats.leadB and stats.leadB[index])) end
+			lines[#lines + 1] = "hits/shots by lead arm (lifetime): " .. table.concat(parts, " | ")
+			lines[#lines + 1] = ("hits/shots by path: direct %s | silent %s | click %s | manual %s"):format(
+				ratio(stats.pathB and stats.pathB.direct), ratio(stats.pathB and stats.pathB.silent), ratio(stats.pathB and stats.pathB.click), ratio(stats.pathB and stats.pathB.manual))
+			lines[#lines + 1] = ("hits/shots by predict: yes %s | no %s"):format(ratio(stats.predB and stats.predB.yes), ratio(stats.predB and stats.predB.no))
+			lines[#lines + 1] = "last misses (weapon | part | reason | hit chance | distance | walls | mode | origin shift | target speed | ping | lead | pred | path | seen):"
 			for _, line in ipairs(stats.missLog) do lines[#lines + 1] = line end
+			lines[#lines + 1] = "last hits (weapon | part | damage | hit chance | distance | mode | origin shift | ping | lead | pred | path | seen); refreshed on each miss:"
+			for _, line in ipairs(stats.hitLog or {}) do lines[#lines + 1] = line end
 			writefile("nev_miss_report.txt", table.concat(lines, "\n"))
 		end
 	end)
@@ -3193,9 +3429,9 @@ function ShotTracker.logMiss(entity, shot)
 	end
 	if shot.info and shot.info.mode == "rapid fire" and (shot.walls or 0) == 0 and not shot.info.blocked then Events.fire("rapidRejected") end
 	if shot.taps == 2 then Events.fire("tapRejected", entity, shot) end
-	Ballistics.wallResult(shot.weapon, shot.walls or 0, false)
-	if (shot.walls or 0) > 0 and shot.wallParts and (reason == "penetration" or reason == "blocked by geometry") then
-		local expires = os.clock() + 8
+	Ballistics.wallResult(shot.weapon, shot.walls or 0, false, reason ~= "target died" and shot.wallParts or nil)
+	if (shot.walls or 0) > 0 and shot.wallParts and reason ~= "target died" then
+		local expires = os.clock() + 20
 		for _, wallPart in ipairs(shot.wallParts) do Ballistics.blocked[wallPart] = expires end
 	end
 	-- Промах по смещённому origin — это чаще разброс или движущаяся цель, а не
@@ -3231,6 +3467,7 @@ function ShotTracker.missReason(shot, entity)
 		return "double tap not registered", (" (gap {%d}ms)"):format(math.floor((Neverlose.Rage.lastGap or 0) * 1000 + 0.5))
 	end
 	if info.mode == "rapid fire" then return "rapid fire cadence", (" ({%d} shots)"):format(shot.shots or 1) end
+	if info.mode == "direct" and (shot.walls or 0) > 0 then return "penetration", (" ({%d} walls)"):format(shot.walls) end
 	if info.mode == "direct" then return "direct shot not registered", (" ({%d} studs)"):format(math.floor(distance + 0.5)) end
 	if info.chance and info.chance < 60 and not info.direct then return "spread", detail end
 	if (shot.walls or 0) > 0 then return "penetration", (" ({%d} walls)"):format(shot.walls) end
@@ -3277,7 +3514,7 @@ maid:give(runService.Heartbeat:Connect(function()
 			if Neverlose.heard then Neverlose.heard[entity] = nil end
 			if Neverlose.lastKnown then Neverlose.lastKnown[entity] = nil end
 			if Neverlose.Rage and Neverlose.Rage.missStreak then Neverlose.Rage.missStreak[entity] = nil end
-			Ballistics.wallResult(shot.weapon, shot.walls or 0, true)
+			Ballistics.wallResult(shot.weapon, shot.walls or 0, true, shot.wallParts)
 			if shot.info and shot.info.shiftMag and Neverlose.Rage then
 				Neverlose.Rage.learnOrigin(true, shot.info.shiftMag)
 				Neverlose.Rage.noteProbe(true, nil, shot.info.shiftMag)
@@ -3304,7 +3541,7 @@ maid:give(runService.Heartbeat:Connect(function()
 			pcall(Neverlose.Vfx.hit, shot.hitPos, shot.part, false)
 			Events.fire("hit", entity, shot, drop)
 			if Neverlose.Rage and Neverlose.Rage.missStreak then Neverlose.Rage.missStreak[entity] = nil end
-			Ballistics.wallResult(shot.weapon, shot.walls or 0, true)
+			Ballistics.wallResult(shot.weapon, shot.walls or 0, true, shot.wallParts)
 			-- Успешное пробитие снимает чёрную метку со стены: раньше она
 			-- оставалась "заблокированной" даже после попадания.
 			if shot.wallParts then
@@ -3362,7 +3599,7 @@ if shootRemote and type(shootRemote.Send) == "function" then
 						local rageConfig = Neverlose.config.rage
 						local forced = focus and rageConfig.enabled and rageConfig.autoFire and {
 							entity = focus.entity, part = focus.part and focus.part.Name, chance = focus.chance,
-							distance = focus.distance, record = focus.record ~= nil, mode = "silent", shifted = focus.origin ~= nil, shiftMag = focus.origin and (focus.origin - Game.origin()).Magnitude or nil,
+							distance = focus.distance, record = focus.record ~= nil, mode = "silent", shifted = (bullet.Origin - Game.origin()).Magnitude > 0.5, shiftMag = (bullet.Origin - Game.origin()).Magnitude > 0.5 and (bullet.Origin - Game.origin()).Magnitude or nil,
 						} or nil
 						-- A shot that was not aimed at the focused target is never charged to it as a miss.
 						if forced and focus.part and focus.part.Parent then
@@ -3719,9 +3956,72 @@ end
 ---Рабочий радиус поиска смещённого origin. Уважаем настройку и не
 ---схлопываемся от обычных промахов. Отдельно учитываем серверный потолок —
 ---он снижается только после серии отказов регистрации и медленно растёт.
+local pingCache = { at = -1, ms = 60 }
+function Rage.pingMs()
+	local now = os.clock()
+	if now - pingCache.at > 0.5 then
+		pingCache.at = now
+		pcall(function() pingCache.ms = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
+	end
+	return pingCache.ms
+end
+
+-- Extrapolation of an enemy by half the ping, used only at high ping and only for a target that really moves.
+Rage.predictMinPing, Rage.predictMaxLead, Rage.predictMaxShift = 60, 0.2, 6
+Rage.predictCache = setmetatable({}, { __mode = "k" })
+Rage.predictParams = RaycastParams.new()
+Rage.predictParams.FilterType = Enum.RaycastFilterType.Exclude
+
+function Rage.predictCompute(entity, character, position, ping, now)
+	local velocity = Ballistics.smoothVelocity(entity, position, now)
+	if velocity.Magnitude <= 0 then return Vector3.zero end
+	local offset = velocity * math.clamp(ping / 2000, 0, Rage.predictMaxLead)
+	local length = offset.Magnitude
+	if length < 0.1 then return Vector3.zero end
+	if length > Rage.predictMaxShift then offset, length = offset.Unit * Rage.predictMaxShift, Rage.predictMaxShift end
+
+	-- Do not push the point into geometry: stop short of the first solid thing on the way.
+	local ignore = table.clone(Ballistics.ignoreList())
+	if character then ignore[#ignore + 1] = character end
+	Rage.predictParams.FilterDescendantsInstances = ignore
+	local hit = workspaceService:Raycast(position, offset.Unit * (length + 0.4), Rage.predictParams)
+	if hit and hit.Instance and hit.Instance.CanCollide and not Ballistics.isPassThrough(hit.Instance) then
+		local free = (hit.Position - position).Magnitude - 0.4
+		if free < 0.1 then return Vector3.zero end
+		if free < length then offset = offset.Unit * free end
+	end
+	return offset
+end
+
+---Returns offset, moving, gated. gated is true when ping is high enough for prediction to apply at all.
+-- Aim-point prediction stays off until it is proven not to double-count the lead bandit.
+Rage.predictAim = false
+
+function Rage.predictOffset(entity, character, position, fresh)
+	if not (entity and typeof(position) == "Vector3") then return Vector3.zero, false, false end
+	local ping = Rage.pingMs()
+	if type(ping) ~= "number" or ping <= Rage.predictMinPing then return Vector3.zero, false, false end
+	local now = os.clock()
+	local cached = not fresh and Rage.predictCache[entity]
+	if cached and now - cached.at < 0.05 then return cached.offset, cached.moving, true end
+	local ok, offset = pcall(Rage.predictCompute, entity, character, position, ping, now)
+	if not ok or typeof(offset) ~= "Vector3" then offset = Vector3.zero end
+	local moving = offset.Magnitude > 0.1
+	if not fresh then
+		if cached then
+			cached.at, cached.offset, cached.moving = now, offset, moving
+		else
+			Rage.predictCache[entity] = { at = now, offset = offset, moving = moving }
+		end
+	end
+	return offset, moving, true
+end
+
 function Rage.originReach()
-	local reach = math.clamp(tonumber(Neverlose.config.rage.originRange) or 2, 0.5, 9.3)
+	local reach = math.clamp(tonumber(Neverlose.config.rage.originRange) or 8, 0.5, 16)
 	if type(Rage.originCap) == "number" then reach = math.min(reach, Rage.originCap) end
+	-- Until the server has shown what it accepts, shifts stay small.
+	if Rage.shiftCap == nil then Rage.shiftCap, Rage.shiftCapAt = reach, os.clock() end
 
 	local cap = Rage.shiftCap
 	if type(cap) == "number" then
@@ -3731,7 +4031,7 @@ function Rage.originReach()
 		end
 		reach = math.min(reach, cap)
 	end
-	return math.clamp(reach, 0.5, 12)
+	return math.clamp(reach, 0.5, 16)
 end
 
 ---Серверный лимит сдвига. Считаем только промахи, похожие на отказ
@@ -3743,6 +4043,7 @@ local shiftRejectReasons = {
 	["lag compensation"] = true,
 	["direct shot not registered"] = true,
 	["blocked by geometry"] = true,
+	["desync"] = true,
 }
 
 function Rage.learnServerShift(accepted, reason, magnitude)
@@ -3759,9 +4060,10 @@ function Rage.learnServerShift(accepted, reason, magnitude)
 		return
 	end
 	if not shiftRejectReasons[reason] then return end
+	-- The configured radius is never lowered by rejections; only growth is learned.
 	Rage.shiftStreak = (Rage.shiftStreak or 0) + 1
-	if Rage.shiftStreak >= 3 then
-		local cap = math.min(Rage.shiftCap or mag, mag) - 0.35
+	if false then
+		local cap = math.min(Rage.shiftCap or mag, mag) - 0.6
 		Rage.shiftCap = math.max(1, cap)
 		Rage.shiftStreak = 0
 		Rage.shiftCapAt = os.clock()
@@ -3836,7 +4138,11 @@ function Rage.originShiftsFor(toward)
 end
 
 -- Origin scan: the zypdm | dumpf1x build's search for a clear point around the real origin, same order of candidates and checks.
-local scanCache = { char = nil, at = 0, from = nil, pos = nil, failed = false }
+-- FPS: per-character cache, long failure cache, 1.5 ms time budget per call (the scan resumes from where it stopped),
+-- at most one fresh scan per scanAll (Rage.originBudget), free() is checked before the expensive lands() trace.
+local scanCaches = setmetatable({}, { __mode = "k" })
+local SCAN_BUDGET = 0.0015 -- seconds of wall time one originScan call may spend
+local SCAN_FAIL_TTL = 0.5 -- a failed scan is trusted this long while camera and target barely moved
 local scanParams = RaycastParams.new()
 scanParams.FilterType = Enum.RaycastFilterType.Exclude
 pcall(function() scanParams.CollisionGroup = "Bullet" end)
@@ -3845,17 +4151,42 @@ local scanOverlap = OverlapParams.new()
 scanOverlap.FilterType = Enum.RaycastFilterType.Exclude
 scanOverlap.MaxParts = 8
 
+-- Путь реальная позиция -> origin: игрок обязан мог бы "дойти" до точки без стен.
+-- Гипотеза: сервер сверяет Origin с позицией стрелка и/или трассирует от неё;
+-- точка за стеной/полом — самый вероятный источник "direct shot not registered".
+local pathParams = RaycastParams.new()
+pathParams.FilterType = Enum.RaycastFilterType.Exclude
+pathParams.IgnoreWater = true
+
+function Rage.originReachable(real, point)
+	local delta = point - real
+	if delta.Magnitude < 0.05 then return true end
+	local filter = {}
+	for _, item in ipairs(Ballistics.ignoreList()) do filter[#filter + 1] = item end
+	pathParams.FilterDescendantsInstances = filter
+	for _ = 1, 6 do
+		local result = workspaceService:Raycast(real, delta, pathParams)
+		if not result then return true end
+		local hit = result.Instance
+		if hit.CanCollide and hit.Transparency < 0.9 then return false end
+		filter[#filter + 1] = hit
+		pathParams.FilterDescendantsInstances = filter
+	end
+	return false
+end
+
 function Rage.originScan(character, part, range, penetration, maxWalls)
 	if not part or not part.Parent or not character then return nil end
 	local config = Neverlose.config.rage
 	local from = Game.origin()
 	local aim = part.Position
-	local radius = Rage.originReach()
-	local scans = math.clamp(math.floor(tonumber(config.originScans) or 4), 1, 12)
-	local mode = config.originScanMode or "optimized"
 	local toAim = aim - from
 	local distance = toAim.Magnitude
 	if distance < 0.5 then return nil end
+
+	local radius = Rage.originReach()
+	local scans = math.clamp(math.floor(tonumber(config.originScans) or 4), 1, 12)
+	local mode = config.originScanMode or "optimized"
 
 	radius = math.min(radius, math.max(distance * 0.85, 8.5))
 	if radius < 0.5 then return nil end
@@ -3865,16 +4196,38 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 	local walls = tonumber(maxWalls) or 0
 	local useLand = mode ~= "default"
 	local now = os.clock()
-	local cache = scanCache
-
-	local ignore = Ballistics.ignoreList()
-	scanParams.FilterDescendantsInstances = ignore
-	local overlapIgnore = {}
-	for index = 1, #ignore do
-		if ignore[index] then overlapIgnore[#overlapIgnore + 1] = ignore[index] end
+	local cache = scanCaches[character]
+	if not cache then
+		cache = { at = 0 }
+		scanCaches[character] = cache
 	end
-	overlapIgnore[#overlapIgnore + 1] = character
-	scanOverlap.FilterDescendantsInstances = overlapIgnore
+
+	-- Cheap exits first: a recent failure for (almost) the same camera and target stays a failure.
+	local fromMoved = cache.from and (cache.from - from).Magnitude or math.huge
+	if cache.failed and not cache.pos then
+		local age = now - cache.at
+		if (age < 0.15 and fromMoved < 2)
+			or (age < SCAN_FAIL_TTL and fromMoved < 0.75 and cache.aim and (cache.aim - aim).Magnitude < 1) then
+			return nil, "cached"
+		end
+	end
+	local cacheOnly = (Rage.originBudget or 1) <= 0
+	local retestPos = cache.pos and fromMoved < 2 and (now - cache.at < (cacheOnly and SCAN_FAIL_TTL or 0.15))
+	if cacheOnly and not retestPos then return nil, "skipped" end
+
+	local prepared = false
+	local function prepare()
+		if prepared then return end
+		prepared = true
+		local ignore = Ballistics.ignoreList()
+		scanParams.FilterDescendantsInstances = ignore
+		local overlapIgnore = {}
+		for index = 1, #ignore do
+			if ignore[index] then overlapIgnore[#overlapIgnore + 1] = ignore[index] end
+		end
+		overlapIgnore[#overlapIgnore + 1] = character
+		scanOverlap.FilterDescendantsInstances = overlapIgnore
+	end
 
 	local function clear(point)
 		local delta = aim - point
@@ -3895,7 +4248,7 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 	end
 
 	local function free(point)
-		local parts = workspaceService:GetPartBoundsInRadius(point, 0.15, scanOverlap)
+		local parts = workspaceService:GetPartBoundsInRadius(point, 0.3, scanOverlap)
 		for index = 1, #parts do
 			local other = parts[index]
 			if other.CanCollide and other.CanQuery and other.Transparency < 0.9 and not other:IsDescendantOf(character) then
@@ -3905,30 +4258,45 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 		return true
 	end
 
+	-- Keep the shot origin from creeping right up to the target.
+	local minGap = math.min(distance, 7)
+
+	-- Same acceptance rule as before (clear+free, or lands+free); the point must be free in every branch,
+	-- so the cheap free() runs before the expensive lands() trace and only once.
 	local function test(point)
+		if point ~= from and (aim - point).Magnitude < minGap then return nil end
+		prepare()
 		if mode == "precise" then
+			if not free(point) then return nil end
 			local ok, count = lands(point)
-			if not (ok and count > 0) then return nil end
-			return free(point) and point or nil
+			return (ok and count > 0) and point or nil
 		end
-		if clear(point) and free(point) then return point end
-		if useLand then
+		if clear(point) then return free(point) and point or nil end
+		if useLand and free(point) then
 			local ok = lands(point)
-			if ok and free(point) then return point end
+			if ok then return point end
 		end
 		return nil
 	end
 
-	if cache.char == character and cache.from and now - cache.at < 0.15 and (cache.from - from).Magnitude < 2 then
-		if cache.pos then
-			if test(cache.pos) then
-				cache.at = now
-				return cache.pos
-			end
-		elseif cache.failed then
-			return nil
-		end
+	-- The shifted origin must be walkable from the real position, not through a wall or floor.
+	local baseTest = test
+	test = function(point)
+		local result = baseTest(point)
+		if result and result ~= from and not Rage.originReachable(from, result) then return nil end
+		return result
 	end
+
+	if retestPos then
+		if test(cache.pos) then
+			cache.at = now
+			cache.aim = aim
+			return cache.pos
+		end
+		if cacheOnly then return nil, "skipped" end
+	end
+
+	Rage.originBudget = (Rage.originBudget or 1) - 1
 
 	local forward = toAim.Unit
 	local side = forward:Cross(Vector3.new(0, 1, 0))
@@ -3936,55 +4304,79 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 	side = side.Unit
 	local up = side:Cross(forward).Unit
 
-	local found = test(from)
-	if not found then
-		local rings = { 0.35, 0.6, 0.8, 1 }
-		local steps = math.max(scans, 8)
-		for ringIndex = 1, #rings do
-			local ringRadius = math.max(radius * rings[ringIndex], 1)
-			for step = 1, steps do
-				local angle = ((step - 1) / steps) * 2 * math.pi
-				local candidate = test(from + (side * math.cos(angle) + up * math.sin(angle)) * ringRadius)
-				if candidate then
-					found = candidate
-					break
-				end
-			end
-			if found then break end
+	-- Candidate list in the original order (from, rings, lift, near cluster); inside a ring the sideways
+	-- directions (peek left/right) go first, then up/down, then the diagonals.
+	local list = { from }
+	local rings = { 0.35, 0.6, 0.8, 1 }
+	local steps = math.max(scans, 8)
+	local order, used = {}, {}
+	for _, step in ipairs({ 0, steps // 2, steps // 4, (steps * 3) // 4 }) do
+		if not used[step] then used[step] = true order[#order + 1] = step end
+	end
+	for step = 0, steps - 1 do
+		if not used[step] then used[step] = true order[#order + 1] = step end
+	end
+	for ringIndex = 1, #rings do
+		local ringRadius = math.max(radius * rings[ringIndex], 1)
+		for _, step in ipairs(order) do
+			local angle = (step / steps) * 2 * math.pi
+			list[#list + 1] = from + (side * math.cos(angle) + up * math.sin(angle)) * ringRadius
 		end
 	end
+	local lift = math.min(radius * 0.5, 2.5)
+	list[#list + 1] = from + Vector3.new(0, lift, 0)
+	list[#list + 1] = from - Vector3.new(0, lift, 0)
+	-- High and sideways reach: over cover and around corners, for an enemy that hides behind his own shift.
+	local sky = Vector3.new(0, 1, 0)
+	list[#list + 1] = from + sky * radius * 0.6
+	list[#list + 1] = from + sky * radius
+	list[#list + 1] = from + sky * radius * 0.6 + side * radius * 0.6
+	list[#list + 1] = from + sky * radius * 0.6 - side * radius * 0.6
+	list[#list + 1] = from + side * radius
+	list[#list + 1] = from - side * radius
+	list[#list + 1] = from + sky * radius * 0.35 + side * radius
+	list[#list + 1] = from + sky * radius * 0.35 - side * radius
+	local near = math.max(radius * 0.24, 1.5)
+	local mid = math.max(radius * 0.36, 2.5)
+	local far = math.max(radius * 0.5, 3.5)
+	list[#list + 1] = from + forward * near
+	list[#list + 1] = from + forward * near + side * mid
+	list[#list + 1] = from + forward * near - side * mid
+	list[#list + 1] = from + forward * mid + side * near
+	list[#list + 1] = from + forward * mid - side * near
+	list[#list + 1] = from + forward * mid
+	list[#list + 1] = from + side * far
+	list[#list + 1] = from - side * far
+	list[#list + 1] = from + forward * far
 
-	if not found then
-		local lift = math.min(radius * 0.5, 2.5)
-		found = test(from + Vector3.new(0, lift, 0))
-		if not found then found = test(from - Vector3.new(0, lift, 0)) end
+	-- Resume an interrupted scan of the same target instead of restarting from candidate 1.
+	local startIndex = 1
+	if cache.cursor and cache.cursorFrom and now - (cache.cursorAt or 0) < 0.35 and (cache.cursorFrom - from).Magnitude < 1 then
+		startIndex = math.min(cache.cursor, #list)
 	end
+	cache.cursor = nil
 
-	if not found then
-		local near = math.max(radius * 0.3, 1.5)
-		local mid = math.max(radius * 0.45, 2.5)
-		local far = math.max(radius * 0.6, 3.5)
-		local candidates = {
-			from + forward * near,
-			from + forward * near + side * mid,
-			from + forward * near - side * mid,
-			from + forward * mid + side * near,
-			from + forward * mid - side * near,
-			from + forward * mid,
-			from + side * far,
-			from - side * far,
-			from + forward * far,
-		}
-		for index = 1, #candidates do
-			found = test(candidates[index])
-			if found then break end
+	local deadline = now + SCAN_BUDGET
+	local found
+	local index = startIndex
+	local visited = 0
+	while visited < #list do
+		found = test(list[index])
+		if found then break end
+		visited += 1
+		index = index % #list + 1
+		if visited < #list and os.clock() > deadline then
+			cache.cursor, cache.cursorAt, cache.cursorFrom = index, os.clock(), from
+			cache.from, cache.aim, cache.pos, cache.failed = from, aim, nil, false
+			cache.at = os.clock()
+			return nil, "partial"
 		end
 	end
 
 	if found then
-		cache.char, cache.at, cache.from, cache.pos, cache.failed = character, os.clock(), from, found, false
+		cache.at, cache.from, cache.aim, cache.pos, cache.failed = os.clock(), from, aim, found, false
 	else
-		cache.char, cache.at, cache.from, cache.pos, cache.failed = character, os.clock(), from, nil, true
+		cache.at, cache.from, cache.aim, cache.pos, cache.failed = os.clock(), from, aim, nil, true
 	end
 	return found
 end
@@ -4493,7 +4885,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 			for _, from in ipairs(activeOrigins) do
 				local line = position - from
 				local _, reachedFrom, wallsFrom, penaltyFrom = Ballistics.trace(from, line.Unit, line.Magnitude + 2, character, maxWalls)
-				if reachedFrom and (not reached or wallsFrom < walls) then
+				if reachedFrom and wallsFrom <= maxWalls and (not reached or wallsFrom < walls) then
 					reached, walls, usedOrigin, penalty = true, wallsFrom, from, penaltyFrom
 					if wallsFrom == 0 then break end
 				end
@@ -4512,25 +4904,13 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 			end
 		end
 
-		if reached and walls > 0 and not record then
-			local from = usedOrigin or origin
-			local axis = position - from
-			local side = axis.Magnitude > 0.1 and axis.Unit:Cross(Vector3.yAxis) or Vector3.xAxis
-			side = (side.Magnitude > 0.05 and side.Unit or Vector3.xAxis) * math.min(part.Size.X, 0.6) * 0.3
-			for _, nudged in ipairs({ position + side, position - side }) do
-				local line = nudged - from
-				local _, okReached, okWalls = Ballistics.trace(from, line.Unit, line.Magnitude + 2, character, maxWalls)
-				if not okReached or okWalls > walls then return nil end
-			end
-		end
 
 		local health = character:GetAttribute("Health") or 100
 		local damage = Ballistics.damage(properties, part.Name, distance, walls, character)
-		if walls > 0 and wallPenalty and wallPenalty > 0 and wallPenalty < 1 then damage *= wallPenalty end
-		if damage < math.min(minDamage, health) then return nil end
+		if walls == 0 and damage < math.min(minDamage, health) then return nil end
 		-- Shooting through a wall is a last resort: it has to be worth the bullet.
 		if walls > 0 and not record then
-			local wallMin = tonumber(config.wallMinDamage) or 25
+			local wallMin = tonumber(config.wallMinDamage) or 0
 			if damage < wallMin and damage < health then return nil end
 		end
 
@@ -4538,7 +4918,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 			entity = entity, character = character, part = part, position = position, origin = usedOrigin,
 			offset = record and nil or (position - part.Position),
 			damage = damage, walls = walls, record = record, distance = distance, health = health, pixels = pixels,
-			chance = Ballistics.hitChance(spread, distance, part.Size.Magnitude / 3) * (walls > 0 and 0.9 ^ walls or 1),
+			chance = Ballistics.hitChance(spread, distance, part.Size.Magnitude / 3) ,
 		}
 	end
 
@@ -4551,6 +4931,16 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 			if rootPart and (rootPart.Position - origin).Magnitude > maxDist then character = nil end
 			if character and not Game.isImmune(character) and Rage.inReach(character, origin, range, fovPixels) then
 				local bestAny, bestTorso, bestHead
+				local partNames = partNames
+				if maxWalls > 0 and #partNames == 1 and PART_GROUP[partNames[1]] == "Head" then
+					local headPart = character:FindFirstChild(partNames[1])
+					if headPart then
+						local blockedHit = workspaceService:Raycast(origin, headPart.Position - origin, originParams)
+						if blockedHit and blockedHit.Instance ~= headPart and not blockedHit.Instance:IsDescendantOf(character) then
+							partNames = HITBOX_SETS.Multipoint
+						end
+					end
+				end
 
 				activeOrigins = validOrigins
 				if config.originScan then
@@ -4571,14 +4961,14 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 							blocked = (not directReached) or (directWalls or 0) > 0
 						end
 						if blocked and direct.Magnitude < 250 then
-							local found = Rage.originScan(character, aimPart, range, nil, maxWalls)
+							local found, why = Rage.originScan(character, aimPart, range, nil, maxWalls)
 							if found then
 								activeOrigins[1] = found
 								Rage.originRank[entity] = {
 									at = os.clock(), shifts = { found - origin }, camPos = currentCamera.CFrame.Position,
 									camLook = currentCamera.CFrame.LookVector, rootPos = root and root.Position or nil,
 								}
-							else
+							elseif why ~= "skipped" and why ~= "partial" then
 								Rage.originRank[entity] = nil
 							end
 						end
@@ -4683,10 +5073,54 @@ function Rage.aimPoint(target)
 	return part.Position + (target.offset or Vector3.zero)
 end
 
+-- Moving targets keep getting missed, and the right lead depends on the server. Try a few
+-- lead sizes (scaled by ping) and keep the one that actually hits.
+Rage.leadArms = { -0.7, 0, 0.7, 1.5 }
+Rage.leadStats = {}
+function Rage.leadFor(target)
+	local velocity = Ballistics.velocity(target.entity)
+	local flat = Vector3.new(velocity.X, 0, velocity.Z)
+	if flat.Magnitude < 8 then return Vector3.zero, nil end
+	local pick = Rage.leadPick
+	if not (pick and os.clock() - pick.at < 0.3) then
+		local chosen
+		for index = 1, #Rage.leadArms do
+			local st = Rage.leadStats[index]
+			if not st or st.n < 3 then chosen = index break end
+		end
+		if not chosen then
+			if math.random() < 0.12 then
+				chosen = math.random(1, #Rage.leadArms)
+			else
+				local bestRate = -1
+				for index = 1, #Rage.leadArms do
+					local st = Rage.leadStats[index]
+					local rate = (st.h + 1) / (st.n + 2)
+					if rate > bestRate then bestRate, chosen = rate, index end
+				end
+			end
+		end
+		pick = { arm = chosen, at = os.clock() }
+		Rage.leadPick = pick
+	end
+	local ping = 0.08
+	pcall(function() ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() / 1000 end)
+	local base = math.clamp(ping * 0.5, 0.02, 0.12)
+	return flat * base * Rage.leadArms[pick.arm], pick.arm
+end
+
 function Rage.aimBullet(bullet, target, weapon)
 	if not Game.character(target.entity) then return false end
-	local aim = Rage.aimPoint(target)
-	if not aim then return false end
+	local aim0 = Rage.aimPoint(target)
+	if not aim0 then return false end
+	local lead, leadArm = Rage.leadFor(target)
+	-- High ping and a moving target: aim where the enemy should be by now. Never for backtrack records.
+	local predicted
+	if Rage.predictAim and not target.record then
+		local okPredict, shift, moving = pcall(Rage.predictOffset, target.entity, target.character, aim0, true)
+		if okPredict and moving and typeof(shift) == "Vector3" then predicted = shift end
+	end
+	local aim = aim0 + lead + (predicted or Vector3.zero)
 
 	local real = Game.origin()
 	local requested = typeof(bullet.Origin) == "Vector3" and bullet.Origin or real
@@ -4702,10 +5136,16 @@ function Rage.aimBullet(bullet, target, weapon)
 
 		Ballistics.safe = true
 		local hits, reached, walls = Ballistics.trace(from, direction, distance + 2, target.character, maxWalls)
+		local relaxed = false
+		-- The predicted point may sit just outside the rig we see; the server decides the hit, so a clear line is enough.
+		if not reached and predicted and Game.serverHits then
+			local _, _, blockers = Ballistics.traceLocal(from, direction, distance, nil, 0)
+			if blockers == 0 then reached, walls, relaxed = true, 0, true end
+		end
 		Ballistics.safe = false
 		if not reached and not (target.record and walls <= maxWalls) then return nil end
 
-		if reached and walls == 0 and not target.record and target.part then
+		if reached and walls == 0 and not relaxed and not target.record and target.part then
 			local inward = target.part.Position - aim
 			if inward.Magnitude > 0.25 then
 				local inner = aim + inward.Unit * 0.2
@@ -4721,14 +5161,44 @@ function Rage.aimBullet(bullet, target, weapon)
 	-- живёт 0.35 с; если цель за это время ушла за угол, из смещённой точки
 	-- её уже не прострелить, а из камеры — видно. Раньше такой выстрел
 	-- просто отменялся, и получалось "линия нарисована, пули нет".
-	local best = attempt(requested)
-	if target.origin then
-		local shifted = attempt(target.origin)
-		if shifted and (not best or not best.reached or (shifted.walls or 0) < (best.walls or 0)) then
-			best = shifted
+	local function find()
+		local found = attempt(requested)
+		-- Origin мог устареть (игрок сдвинулся с момента скана): снова проверяем
+		-- путь от текущей реальной позиции и отсутствие стен до точки.
+		local shiftedOrigin = target.origin
+		if shiftedOrigin and not Rage.originReachable(real, shiftedOrigin) then shiftedOrigin = nil end
+		if requested ~= real and not Rage.originReachable(real, requested) then
+			found = nil
 		end
+		if shiftedOrigin then
+			local shifted = attempt(shiftedOrigin)
+			if shifted and (not found or not found.reached or (shifted.walls or 0) < (found.walls or 0)) then
+				found = shifted
+			end
+		end
+		if not found and requested ~= real then found = attempt(real) end
+		return found
 	end
-	if not best and requested ~= real then best = attempt(real) end
+	local best = find()
+	if not best and leadArm then
+		aim, leadArm = aim0 + (predicted or Vector3.zero), nil
+		best = find()
+	end
+	if not best and predicted then
+		aim, predicted = aim0, nil
+		best = find()
+	end
+	Rage.leadTag = leadArm and { at = os.clock(), arm = leadArm } or nil
+	-- Диагностика: что реально ушло в выстрел (после всех откатов lead/predict). Один переиспользуемый стол.
+	local meta = Rage.shotMeta
+	if not meta then meta = { at = -1 } Rage.shotMeta = meta end
+	if best then
+		meta.at, meta.arm, meta.factor = os.clock(), leadArm, leadArm and Rage.leadArms[leadArm] or nil
+		meta.lead = leadArm and lead.Magnitude or nil
+		meta.predicted, meta.predMag = predicted ~= nil, predicted and predicted.Magnitude or 0
+	else
+		meta.at = -1
+	end
 	if not best then
 		Rage.aimFail = { at = os.clock(), origin = target.origin or real, aim = aim }
 		return false
@@ -4781,7 +5251,18 @@ Events.addShotRewriter(function(payload)
 
 	local weapon = Game.weapon()
 	for _, bullet in ipairs(payload.Bullets) do
-		if type(bullet) == "table" then pcall(Rage.aimBullet, bullet, target, weapon) end
+		if type(bullet) == "table" then
+			local okAim, aimed = pcall(Rage.aimBullet, bullet, target, weapon)
+			-- A shot that is leaving anyway must not go to the crosshair: aim it at the target.
+			if not (okAim and aimed) and Rage.shooting and target.part and target.part.Parent then
+				local from = Game.origin()
+				local line = Rage.aimPoint(target) or target.part.Position
+				if (line - from).Magnitude > 0.05 then
+					bullet.Origin, bullet.Direction = from, (line - from).Unit
+					if Game.serverHits then bullet.Hits = nil end
+				end
+			end
+		end
 	end
 end)
 
@@ -4842,13 +5323,15 @@ function Rage.remoteFire(weapon, target, tap)
 	})
 	if not ok then Rage.lastFail = "send failed" return false end
 	Rage.lastFail = nil
+	Neverlose.stats = Neverlose.stats or {}
+	Neverlose.stats.shots = (Neverlose.stats.shots or 0) + 1
 
 	local range = weapon.Properties.Range or 500
 	for _, bullet in ipairs(bullets) do
 		local okReg, errReg = pcall(ShotTracker.register, bullet.Origin, bullet.Direction, bullet.Hits or Ballistics.trace(bullet.Origin, bullet.Direction, range, target.character, 2), range, tap, target.damage,
 			{ chance = target.chance, distance = target.distance, record = target.record ~= nil, direct = true,
-				entity = target.entity, part = target.part and target.part.Name, shifted = target.origin ~= nil,
-				shiftMag = target.origin and (target.origin - Game.origin()).Magnitude or nil,
+				entity = target.entity, part = target.part and target.part.Name, shifted = (bullet.Origin - Game.origin()).Magnitude > 0.5,
+				shiftMag = (bullet.Origin - Game.origin()).Magnitude > 0.5 and (bullet.Origin - Game.origin()).Magnitude or nil,
 				mode = tap == 2 and "double tap" or (Neverlose.config.rage.rapidFire and Rage.rapidCapable(weapon) and "rapid fire" or "direct") })
 		if not okReg and os.clock() - (Rage.regErrAt or 0) > 3 then
 			Rage.regErrAt = os.clock()
@@ -4908,7 +5391,7 @@ end
 
 function Rage.rapidMultiplier(cfg, fireRate, name)
 	local requested = cfg.rapidAuto ~= false and 3 or math.clamp(cfg.rapidSpeed / 100, 1, 6)
-	local cap = fireRate >= 0.3 and 1.1 or fireRate >= 0.2 and 1.25 or fireRate >= 0.12 and 1.45 or 1.7
+	local cap = fireRate >= 0.3 and 1.15 or fireRate >= 0.2 and 1.4 or fireRate >= 0.12 and 1.8 or 2.2
 	local limit = math.min(requested, cap)
 	local learned = name and Rage.rapidLearn[name]
 	return learned and math.min(limit, learned) or limit
@@ -5072,6 +5555,15 @@ end
 -- Recent real results tune how picky the ragebot is: many misses -> wait for better shots.
 Rage.accWindow = {}
 function Rage.recordShot(ok)
+	local tag = Rage.leadTag
+	if tag and os.clock() - tag.at < 1.5 then
+		Rage.leadTag = nil
+		local st = Rage.leadStats[tag.arm] or { n = 0, h = 0 }
+		Rage.leadStats[tag.arm] = st
+		st.n += 1
+		if ok then st.h += 1 end
+		if st.n > 24 then st.n, st.h = st.n / 2, st.h / 2 end
+	end
 	local window = Rage.accWindow
 	if #window > 0 and os.clock() - (Rage.accAt or 0) > 25 then table.clear(window) end
 	Rage.accAt = os.clock()
@@ -5097,6 +5589,23 @@ Events.on("hit", function()
 end)
 Events.on("kill", function() Rage.recordShot(true) end)
 
+-- Учёт попаданий для диагностики (ведра пинга / лидирование / путь) и строка в hitLog.
+local function logHit(shot, damage)
+	if type(shot) ~= "table" then return end
+	local stats = Neverlose.stats or {}
+	Neverlose.stats = stats
+	ShotTracker.account(shot, true)
+	local info = shot.info or {}
+	stats.hitLog = stats.hitLog or {}
+	table.insert(stats.hitLog, ("%s | %s | %s | hc %s | %s st | mode %s | shift %s | %s"):format(
+		tostring(shot.weapon), tostring(shot.part), damage and ("-" .. math.floor(damage + 0.5)) or "kill",
+		tostring(info.chance and math.floor(info.chance + 0.5)), tostring(info.distance and math.floor(info.distance + 0.5)), tostring(info.mode),
+		tostring(info.shiftMag and math.floor(info.shiftMag * 10 + 0.5) / 10), ShotTracker.tag(shot)))
+	if #stats.hitLog > 40 then table.remove(stats.hitLog, 1) end
+end
+Events.on("hit", function(_, shot, damage) pcall(logHit, shot, damage) end)
+Events.on("kill", function(_, shot) pcall(logHit, shot, nil) end)
+
 local function rageStep()
 	local config = Neverlose.config.rage
 	Rage.target, Rage.stopping, Rage.shooting = nil, false, false
@@ -5113,6 +5622,14 @@ local function rageStep()
 	local target = targets[1]
 	Rage.target = target
 	if target then Rage.lastTargetAt = os.clock() end
+	if target then
+		-- Диагностика: сколько непрерывно эта цель остаётся целью рейджа (для строки отчёта).
+		local track = Rage.visTrack
+		if not track then track = { last = -1 } Rage.visTrack = track end
+		local stamp = os.clock()
+		if track.entity ~= target.entity or stamp - track.last > 0.3 then track.entity, track.since = target.entity, stamp end
+		track.last = stamp
+	end
 	if target and not Rage.seenAt then
 		Rage.seenAt = os.clock()
 	elseif not target and os.clock() - (Rage.lastTargetAt or 0) > 0.3 then
@@ -5126,7 +5643,8 @@ local function rageStep()
 	local sniper = Game.isSniper(weapon)
 	local revolver = weapon.Properties.ShootingOptions == "Revolver"
 
-	local direct = not revolver and (config.doubleTap or (config.rapidFire and Rage.rapidCapable(weapon)))
+	local slowGun = (weapon.Properties.FireRate or 0.1) >= 0.3
+	local direct = not revolver and ((config.doubleTap and not slowGun) or (config.rapidFire and Rage.rapidCapable(weapon)))
 	local need = Rage.requiredChance(weapon, target, config)
 	-- An enemy that just stepped out gets shot at once, before he steps back.
 	local fresh = Rage.seenAt and os.clock() - Rage.seenAt < 0.45 and (target.walls or 0) == 0 and (target.damage or 0) >= math.max(config.minDamage or 0, 1)
@@ -5142,11 +5660,11 @@ local function rageStep()
 		end
 	end
 	if lateral > 14 and not fresh and (target.distance or 0) > 35 then need = math.min(need + math.min((lateral - 14) * 0.8, 12), 97) end
-	if Rage.stable < 2 and not fresh then return end
+	if Rage.stable < 1 and not fresh then return end
 
 	if (target.walls or 0) > 0 then
-		need = math.min(need + 8, 97)
-		if Rage.stable < 5 then return end
+		need = math.min(need + 4, 97)
+		if Rage.stable < 2 then return end
 	end
 	if not direct and target.chance < (fresh and need * 0.75 or need) then return end
 	if direct and target.chance < need * 0.65 and (target.damage or 0) < (target.health or 100) then return end
@@ -5200,19 +5718,19 @@ local function rageStep()
 	Rage.shooting = true
 	local shotStats = Neverlose.stats or {}
 	Neverlose.stats = shotStats
-	shotStats.shots = (shotStats.shots or 0) + 1
+	shotStats.attempts = (shotStats.attempts or 0) + 1
 	shotStats.reactMs = (now - (Rage.seenAt or now)) * 1000
 	Rage.delayEntity = nil
 
 	local multi = config.multiTarget and #targets > 1
-	if not revolver and (direct or multi or config.doubleTap) then
+	if not revolver and (direct or (multi and not slowGun) or (config.doubleTap and not slowGun)) then
 		local list = {}
 		for _, entry in ipairs(targets) do
 			if direct or entry.chance >= Rage.requiredChance(weapon, entry, config) then list[#list + 1] = entry end
 		end
 		if #list == 0 then list[1] = target end
 
-		local perTarget = (config.doubleTap and (weapon.Rounds or 0) >= 2 and (target.walls or 0) == 0) and 2 or 1
+		local perTarget = (config.doubleTap and not slowGun and (weapon.Rounds or 0) >= 2 and (target.walls or 0) == 0) and 2 or 1
 		local budget = (config.multiTarget and #list or 1) * perTarget
 		local gap = perTarget == 2 and Rage.tapGap(fireRate) or 0
 		Rage.lastGap = gap
@@ -5265,9 +5783,15 @@ local function rageStep()
 	end
 
 	if not Rage.aimBullet({ Origin = Game.origin() }, target, weapon) then
-		lastShot = retryAt
-		return
+		shotStats.refused = (shotStats.refused or 0) + 1
+		-- An open-line target is still shot: the send hook re-aims the bullet at him instead of the crosshair.
+		if (target.walls or 0) > 0 or target.record then
+			lastShot = retryAt
+			return
+		end
 	end
+	shotStats.shots = (shotStats.shots or 0) + 1
+	Rage.clickAt = os.clock()
 
 	if revolver and mouse2click then
 		mouse2click()
@@ -5639,7 +6163,7 @@ local bulletModule = Game.modules.bullet
 if bulletModule and type(bulletModule.getTrueSpread) == "function" then
 	Patch.hook(bulletModule.getTrueSpread, function(original)
 		return function(self, ...)
-			if Neverlose.config.rage.noSpread then return 0 end
+			if Neverlose.config.rage.noSpread or Neverlose.config.rage.enabled then return 0 end
 			return original(self, ...)
 		end
 	end)
@@ -5723,6 +6247,7 @@ end
 
 -- Second pass when the core samples are all blocked: corners of every limb, so a sliver of arm or foot counts as visible.
 local limbCache = setmetatable({}, { __mode = "k" })
+local LIMB_CORNERS = { Vector3.new(0, 0, 0), Vector3.new(1, 1, 1), Vector3.new(-1, 1, 1), Vector3.new(1, -1, -1), Vector3.new(-1, -1, -1), Vector3.new(1, 1, -1), Vector3.new(-1, -1, 1) }
 local function limbSight(from, character)
 	local cached = limbCache[character]
 	local clock = os.clock()
@@ -5732,7 +6257,7 @@ local function limbSight(from, character)
 		if object:IsA("BasePart") and object.Transparency < 0.95 and object.Name ~= "HumanoidRootPart" then
 			local half = object.Size / 2
 			local frame = object.CFrame
-			for _, corner in ipairs({ Vector3.new(0, 0, 0), Vector3.new(1, 1, 1), Vector3.new(-1, 1, 1), Vector3.new(1, -1, -1), Vector3.new(-1, -1, -1), Vector3.new(1, 1, -1), Vector3.new(-1, -1, 1) }) do
+			for _, corner in ipairs(LIMB_CORNERS) do
 				if not blockedBetween(from, (frame * CFrame.new(half * corner * 0.92)).Position) then seen = true break end
 			end
 			if seen then break end
@@ -5742,17 +6267,26 @@ local function limbSight(from, character)
 	return seen
 end
 
+local SIGHT_FEET, SIGHT_CHEST, SIGHT_SOLE = Vector3.new(0, 2, 0), Vector3.new(0, 0.9, 0), Vector3.new(0, 2.8, 0)
 function bodySight(from, root, head, character)
 	local right = root.CFrame.RightVector
 	local base = root.Position
-	local points = { base, base + right * 1.1, base - right * 1.1, base - Vector3.new(0, 2, 0), base + Vector3.new(0, 0.9, 0) + right * 0.8, base + Vector3.new(0, 0.9, 0) - right * 0.8, base - Vector3.new(0, 2.8, 0) }
-	if head then points[#points + 1] = head.Position end
-	local seen = 0
-	for _, point in ipairs(points) do
-		if not blockedBetween(from, point) then seen += 1 end
+	local count = head and 8 or 7
+	-- Callers only test for > 0, so the first visible sample ends the scan.
+	for index = 1, count do
+		local point
+		if index == 1 then point = base
+		elseif index == 2 then point = base + right * 1.1
+		elseif index == 3 then point = base - right * 1.1
+		elseif index == 4 then point = base - SIGHT_FEET
+		elseif index == 5 then point = base + SIGHT_CHEST + right * 0.8
+		elseif index == 6 then point = base + SIGHT_CHEST - right * 0.8
+		elseif index == 7 then point = base - SIGHT_SOLE
+		else point = head.Position end
+		if not blockedBetween(from, point) then return 1 / count end
 	end
-	if seen == 0 and character and limbSight(from, character) then return 1 / #points end
-	return seen / #points
+	if character and limbSight(from, character) then return 1 / count end
+	return 0
 end
 end
 
@@ -6529,9 +7063,10 @@ function weaponIcon(name, allowFallback)
 	return image
 end
 
+local SLOT_NAMES = { "Slot1", "Slot2", "Slot3", "Slot4", "Slot5", "Slot6" }
 function slotHas(entity, needle)
 	for index = 1, 6 do
-		local value = entity:GetAttribute("Slot" .. index)
+		local value = entity:GetAttribute(SLOT_NAMES[index])
 		if type(value) == "string" and value:find(needle, 1, true) then return true end
 	end
 	return false
@@ -6760,6 +7295,7 @@ function EspObject.new(entity)
 	self.readyBar = draw("Line", { Thickness = 2 })
 	self.snap = draw("Line", { Thickness = 1 })
 	self.headDot = draw("Circle", { Filled = true, NumSides = 12 })
+	self.realPos = draw("Circle", { Filled = false, NumSides = 20, Thickness = 1.5 })
 	self.arrow = draw("Triangle", { Filled = true, Thickness = 1 })
 	self.arrowWing = draw("Triangle", { Filled = true, Thickness = 1 })
 	self.arrowEdge = draw("Triangle", { Filled = false, Thickness = 1.5, Color = Color3.new() })
@@ -6788,7 +7324,7 @@ end
 
 local DRAWING_KEYS = {
 	"boxGlow", "boxOutline", "box", "fill", "name", "distance", "weapon", "flags", "aim", "healthText", "healthBack", "healthBar", "hpFrame", "hpBack",
-	"armorBack", "armorBar", "ammoBack", "ammoBar", "readyBack", "readyBar", "snap", "headDot", "arrow", "arrowWing", "arrowEdge", "arrowEdge2", "arrowGlow", "arrowText",
+	"armorBack", "armorBar", "ammoBack", "ammoBar", "readyBack", "readyBar", "snap", "headDot", "realPos", "arrow", "arrowWing", "arrowEdge", "arrowEdge2", "arrowGlow", "arrowText",
 }
 
 function Neverlose.partShape(part, toScreen)
@@ -6868,7 +7404,7 @@ function EspObject:drawGhost(character, record, chams)
 	local boost = slot == "wallGhost" and math.clamp((Neverlose.config.esp.wallBoost or 60) / 100, 0, 1) or 0
 	local fillT = math.min(style.fill + (style.pulse and 0.16 * breath or 0), 1)
 	light.FillTransparency = fillT + (math.min(fillT, 0.4) - fillT) * boost
-	light.OutlineColor = color:Lerp(Color3.new(1, 1, 1), style.rim or 0.35)
+	light.OutlineColor = slot == "wallGhost" and color or color:Lerp(Color3.new(1, 1, 1), style.rim or 0.35)
 	light.OutlineTransparency = math.max(style.outline - 0.05, 0) * (1 - boost)
 	if any and Neverlose.Xray then
 		local xrayT = math.clamp(0.42 + style.fill * 0.4, 0.42, 0.85)
@@ -6889,7 +7425,13 @@ function EspObject:hideGhost(only)
 	end
 end
 
+local BONE_KEYS, EMPTY_LIST = {}, {}
+for index = 1, #BONES do BONE_KEYS[index] = "bone" .. index end
+
 function EspObject:hideDrawings()
+	self.realShift = nil
+	if not self.drawn then return end
+	self.drawn = false
 	for _, key in ipairs(DRAWING_KEYS) do self[key].Visible = false end
 	if self.hitAdorns then
 		for _, adorn in pairs(self.hitAdorns) do pcall(function() adorn.Visible = false end) end
@@ -7953,6 +8495,24 @@ local function silhouettePart(part)
 	if part:FindFirstAncestorOfClass("Tool") or part:FindFirstAncestorOfClass("Accessory") then return false end
 	return true
 end
+Neverlose.silhouettePart, Neverlose.partExtents = silhouettePart, partExtents
+
+-- Expands the screen bounds by the 8 corners of one part; corners behind the camera are skipped (they project to infinity).
+local function growBox(camera, cameraFrame, cf, size, minX, minY, maxX, maxY)
+	local ex, ey, ez = size.X / 2, size.Y / 2, size.Z / 2
+	for index = 0, 7 do
+		local world = cf * Vector3.new(index % 2 == 0 and -ex or ex, index // 2 % 2 == 0 and -ey or ey, index // 4 == 0 and -ez or ez)
+		if cameraFrame:PointToObjectSpace(world).Z <= -0.1 then
+			local point = camera:WorldToViewportPoint(world)
+			local px, py = point.X, point.Y
+			if px < minX then minX = px end
+			if px > maxX then maxX = px end
+			if py < minY then minY = py end
+			if py > maxY then maxY = py end
+		end
+	end
+	return minX, minY, maxX, maxY
+end
 
 function EspObject:tightBox(character)
 	local now = os.clock()
@@ -7965,52 +8525,20 @@ function EspObject:tightBox(character)
 		self.tightParts = list
 	end
 	local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
-	local found = false
 	local cameraFrame = currentCamera.CFrame
-	-- Угол за камерой проецируется в бесконечность: из-за этого бокс раздувался,
-	-- когда цель подходила вплотную. Такие углы просто пропускаем.
-	local function cornerPoint(world)
-		local relative = cameraFrame:PointToObjectSpace(world)
-		if relative.Z > -0.1 then return nil end
-		return currentCamera:WorldToViewportPoint(world)
-	end
 	for _, part in ipairs(self.tightParts) do
 		if part.Parent then
-			local cf, extent = part.CFrame, partExtents(part) / 2
-			for _, sx in ipairs({ -1, 1 }) do
-				for _, sy in ipairs({ -1, 1 }) do
-					for _, sz in ipairs({ -1, 1 }) do
-						local point = cornerPoint(cf * Vector3.new(extent.X * sx, extent.Y * sy, extent.Z * sz))
-						if point then
-							found = true
-							minX, maxX = math.min(minX, point.X), math.max(maxX, point.X)
-							minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
-						end
-					end
-				end
-			end
+			minX, minY, maxX, maxY = growBox(currentCamera, cameraFrame, part.CFrame, partExtents(part), minX, minY, maxX, maxY)
 		end
 	end
 	-- Риг без распознаваемых частей: падаем на габарит всей модели.
-	if not found then
+	if maxX == -math.huge then
 		local ok, cf, size = pcall(function() return character:GetBoundingBox() end)
 		if ok and typeof(cf) == "CFrame" and typeof(size) == "Vector3" then
-			local cf2, extent = cf, size / 2
-			for _, sx in ipairs({ -1, 1 }) do
-				for _, sy in ipairs({ -1, 1 }) do
-					for _, sz in ipairs({ -1, 1 }) do
-						local point = cornerPoint(cf2 * Vector3.new(extent.X * sx, extent.Y * sy, extent.Z * sz))
-						if point then
-							found = true
-							minX, maxX = math.min(minX, point.X), math.max(maxX, point.X)
-							minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
-						end
-					end
-				end
-			end
+			minX, minY, maxX, maxY = growBox(currentCamera, cameraFrame, cf, size, minX, minY, maxX, maxY)
 		end
 	end
-	if not found then return nil end
+	if maxX == -math.huge then return nil end
 	return minX, minY, maxX, maxY
 end
 
@@ -8020,6 +8548,7 @@ function EspObject:hideArrow()
 end
 
 function EspObject:drawArrow(worldPosition, color)
+	self.drawn = true
 	local config = Neverlose.config.esp
 	local relative = currentCamera.CFrame:PointToObjectSpace(worldPosition)
 	local target = math.atan2(relative.Z, relative.X)
@@ -8299,8 +8828,11 @@ function EspObject:update(delta)
 		if rawCharacter and rawCharacter == self.lastCharacter and not rawCharacter:IsDescendantOf(workspaceService) then kept = rawCharacter end
 		self.dormantAt = self.dormantAt or os.clock()
 		local age = os.clock() - self.dormantAt
-		if age < (config.lastSeenTime or 10) and kept.Parent and kept:GetAttribute("Dead") ~= true and entity:GetAttribute("Dead") ~= true
-			and kept:FindFirstChild("HumanoidRootPart") and kept:FindFirstChild("Head") and Game.isEnemy(entity, true) and not Neverlose.isDown(entity)
+		local keptRoot = age < (config.lastSeenTime or 10) and kept.Parent and kept:FindFirstChild("HumanoidRootPart")
+		local keptAt = keptRoot and keptRoot:IsA("BasePart") and keptRoot.Position
+		if keptAt and keptAt.X == keptAt.X and keptAt.Y == keptAt.Y and keptAt.Z == keptAt.Z and keptAt.Magnitude < 100000
+			and kept:GetAttribute("Dead") ~= true and entity:GetAttribute("Dead") ~= true
+			and kept:FindFirstChild("Head") and Game.isEnemy(entity, true) and not Neverlose.isDown(entity)
 			and not (entity.Parent == nil) then
 			character, ghostAge = kept, age
 			Neverlose.ghostShown[entity] = true
@@ -8324,7 +8856,7 @@ function EspObject:update(delta)
 			end
 		end
 		local ragdolls = config.enemyModel.ragdolls
-		if config.enabled and rawCharacter and rawCharacter.Parent and CHAMS_STYLE[ragdolls.mode] and Game.isEnemy(entity, true) then
+		if config.enabled and rawCharacter and rawCharacter.Parent and CHAMS_STYLE[ragdolls.mode] and rawCharacter:IsDescendantOf(workspaceService) and Game.isEnemy(entity, true) then
 			self:applyChams(rawCharacter, { mode = "Disabled" }, ragdolls, nil)
 		else
 			self:hideHighlights()
@@ -8365,7 +8897,7 @@ function EspObject:update(delta)
 		else
 			self:hideHighlights()
 		end
-	elseif modelsOn or config.legit then
+	elseif config.legit or (modelsOn and CHAMS_STYLE[model.player.mode] ~= nil) then
 
 		if os.clock() - (self.wallsAt or 0) > 0.016 then
 			self.wallsAt = os.clock()
@@ -8427,6 +8959,7 @@ function EspObject:update(delta)
 		return
 	end
 	self:hideArrow()
+	self.drawn = true
 
 	local top = currentCamera:WorldToViewportPoint((head and head.Position or root.Position) + Vector3.new(0, 0.75, 0))
 	local bottom = currentCamera:WorldToViewportPoint(root.Position - Vector3.new(0, 3, 0))
@@ -8442,7 +8975,7 @@ function EspObject:update(delta)
 		if x0 and (y1 - y0 > refHeight * 1.5 or x1 - x0 > math.max(refWidth * 2, refHeight)) then x0 = nil end
 		if x0 and x1 - x0 > 2 and y1 - y0 > 2 then
 			position = Vector2.new(math.floor(x0), math.floor(y0))
-			width, height = math.floor(x1 - x0), math.floor(y1 - y0)
+			width, height = math.floor(x1) - math.floor(x0), math.floor(y1) - math.floor(y0)
 			size = Vector2.new(width, height)
 			rootPoint = Vector3.new(position.X + width / 2, rootPoint.Y, rootPoint.Z)
 			top = Vector3.new(rootPoint.X, position.Y, rootPoint.Z)
@@ -8591,6 +9124,37 @@ function EspObject:update(delta)
 	else
 		self:haloHide("snap")
 	end
+	-- Where the server most likely has him right now: the replicated rig lags by half the ping plus interpolation.
+	self.realPos.Visible = false
+	if config.realPos and isEnemy and not ghostAge and root then
+		-- Same extrapolation the ragebot aims with; below the ping threshold the old estimate stays.
+		local shift = Vector3.zero
+		local okPredict, offset, moving, gated = pcall(Rage.predictOffset, self.entity, character, root.Position, false)
+		if okPredict and gated then
+			if moving then shift = offset end
+		else
+			local ahead = math.clamp(Rage.pingMs() / 2000 + 0.1, 0.05, 0.4)
+			local velocity = Ballistics.velocity(self.entity)
+			local flat = Vector3.new(velocity.X, 0, velocity.Z)
+			if flat.Magnitude > 2 then shift = flat * ahead end
+		end
+		-- The estimate refreshes in steps; easing the offset (not the position) keeps the ring glued to the rig without popping.
+		local eased = self.realShift
+		eased = eased and eased:Lerp(shift, math.clamp((delta or 0.016) * 14, 0, 1)) or shift
+		self.realShift = eased
+		if eased.Magnitude > 0.1 then
+			local point, onScreen = currentCamera:WorldToViewportPoint(root.Position + eased)
+			if onScreen and point.Z > 0 then
+				self.realPos.Position = fixPoint(point)
+				self.realPos.Radius = math.clamp(height * 0.08, 4, 22)
+				self.realPos.Color = config.realPosColor
+				self.realPos.ZIndex = 2
+				self.realPos.Visible = true
+			end
+		end
+	else
+		self.realShift = nil
+	end
 	self.headDot.Visible = item(team, "Main/Head Dot") and head ~= nil
 	if self.headDot.Visible then
 		local headPoint = currentCamera:WorldToViewportPoint(head.Position)
@@ -8637,7 +9201,7 @@ function EspObject:update(delta)
 		self.armorBack.Visible, self.armorBar.Visible = false, false
 	end
 
-	local equipped = Game.equipped(entity)
+	local equipped = Game.equippedShared(entity)
 	local equipName = equipped and equipped.Name
 	if equipName ~= self.equipName then
 		self.equipName, self.equipAt = equipName, os.clock()
@@ -8676,9 +9240,11 @@ function EspObject:update(delta)
 		textY += (colors.distanceSize or 12) + 2
 	end
 
+	local hasC4 = equipName == "C4"
+	if not hasC4 and (item(team, "Weapon/Bomb") or item(team, "Flags/Bomb")) then hasC4 = slotHas(entity, "C4") end
 	local weaponTags = {}
 	if item(team, "Weapon/Text") and equipName then weaponTags[#weaponTags + 1] = equipName end
-	if item(team, "Weapon/Bomb") and (equipName == "C4" or slotHas(entity, "C4")) then weaponTags[#weaponTags + 1] = "C4" end
+	if item(team, "Weapon/Bomb") and hasC4 then weaponTags[#weaponTags + 1] = "C4" end
 	if item(team, "Weapon/Defuser") and entity:GetAttribute("HasDefuseKit") == true then weaponTags[#weaponTags + 1] = "KIT" end
 	if item(team, "Weapon/Taser") and slotHas(entity, "Zeus") then weaponTags[#weaponTags + 1] = "ZEUS" end
 	self.weapon.Visible = #weaponTags > 0
@@ -8701,11 +9267,11 @@ function EspObject:update(delta)
 	flag("Blind", "BLIND", entity:GetAttribute("IsFlashed") == true or character:GetAttribute("Flashed") == true or character:GetAttribute("IsFlashed") == true)
 	flag("Scoped", "ZOOM", (tonumber(entity:GetAttribute("ScopeIncrement")) or 0) > 0)
 	flag("Reload", "RELOAD", (equipped and equipped.IsReloading == true) or entity:GetAttribute("IsReloading") == true)
-	flag("Immunity", "IMMUNE", Game.isImmune(character))
+	flag("Immunity", "IMMUNE", item(team, "Flags/Immunity") and Game.isImmune(character))
 	local speed = Ballistics.velocity(entity).Magnitude
 	flag("Slowed", "SLOW", speed > 0.5 and speed < 7)
 	flag("Vulnerable", "LETHAL", health <= 30)
-	flag("Bomb", "C4", equipName == "C4" or slotHas(entity, "C4"))
+	flag("Bomb", "C4", hasC4)
 	flag("Defuse", "DEFUSING", entity:GetAttribute("IsDefusingBomb") == true)
 	flag("Pin Pulled", "PIN", equipName ~= nil and GRENADES[equipName] ~= nil and (entity:GetAttribute("IsThrowing") == true or entity:GetAttribute("IsShooting") == true))
 	local money = tonumber(entity:GetAttribute("Money"))
@@ -8750,15 +9316,15 @@ function EspObject:update(delta)
 	local okHp, errHp = pcall(self.drawBars, self, colors, position, width)
 	if not okHp then report(errHp) end
 	local aimedPart = Rage.target and Rage.target.entity == entity and Rage.target.part and Rage.target.part.Name or nil
-	local selected = item(team, "Aimbot/Hitboxes") and Rage.target and Rage.target.entity == entity and BODY_PARTS or {}
+	local selected = item(team, "Aimbot/Hitboxes") and Rage.target and Rage.target.entity == entity and BODY_PARTS or EMPTY_LIST
+	local wantHits = #selected > 0
+	if wantHits or self.hitShown then
+	if not self.hitShown then self.hitBlendAt = os.clock() end
+	self.hitShown = wantHits
 	local chosen = hitboxParts(Neverlose.config.rage.hitboxList, Neverlose.config.rage.hitboxes)
 	self.hitBlend = self.hitBlend or {}
 	local blendStep = math.min((os.clock() - (self.hitBlendAt or os.clock())) * 9, 1)
 	self.hitBlendAt = os.clock()
-	local function toScreen(world)
-		local point = currentCamera:WorldToViewportPoint(world)
-		return point.Z > 0 and Vector2.new(point.X, point.Y) or nil
-	end
 	for index, name in ipairs(BODY_PARTS) do
 		local fill, outline = self.hitDots[index], self.hitDots[#BODY_PARTS + index]
 		local part = table.find(selected, name) and character:FindFirstChild(name)
@@ -8783,12 +9349,15 @@ function EspObject:update(delta)
 			adorn.Visible = false
 		end
 	end
+	end
 
 	local skeleton = item(team, "Main/Skeleton")
 	local skeletonGlow = colors.glowSkeleton and colors.glowSkeletonColor or nil
+	if skeleton or self.bonesOn then
+	self.bonesOn = skeleton
 	for index, bone in ipairs(BONES) do
 		local line = self.bones[index]
-		local from, to = character:FindFirstChild(bone[1]), character:FindFirstChild(bone[2])
+		local from, to = skeleton and character:FindFirstChild(bone[1]), skeleton and character:FindFirstChild(bone[2])
 		if skeleton and from and to then
 			local a, aVisible = currentCamera:WorldToViewportPoint(from.Position)
 			local b, bVisible = currentCamera:WorldToViewportPoint(to.Position)
@@ -8797,14 +9366,15 @@ function EspObject:update(delta)
 			line.Thickness = colors.skelThick or 1
 			line.ZIndex = 1
 			if skeletonGlow then
-				self:haloLine("bone" .. index, line.From, line.To, skeletonGlow, line.Thickness, line.Visible)
+				self:haloLine(BONE_KEYS[index], line.From, line.To, skeletonGlow, line.Thickness, line.Visible)
 			else
-				self:haloHide("bone" .. index)
+				self:haloHide(BONE_KEYS[index])
 			end
 		else
 			line.Visible = false
-			self:haloHide("bone" .. index)
+			self:haloHide(BONE_KEYS[index])
 		end
+	end
 	end
 
 	local historyChams = config.enemyModel.history
@@ -10243,8 +10813,8 @@ function Preview.update()
 		local bx0, by0, bx1, by1 = math.huge, math.huge, -math.huge, -math.huge
 		if cfg.tightBox ~= false then
 			for _, part in ipairs(model:GetDescendants()) do
-				if silhouettePart(part) then
-					local cf, extent = part.CFrame, partExtents(part) / 2
+				if Neverlose.silhouettePart(part) then
+					local cf, extent = part.CFrame, Neverlose.partExtents(part) / 2
 					for _, sx in ipairs({ -1, 1 }) do
 						for _, sy in ipairs({ -1, 1 }) do
 							for _, sz in ipairs({ -1, 1 }) do
@@ -15945,6 +16515,7 @@ function Menu.visuals(window, hk)
 	soundSettings:AddColorpicker("Neon Color", esp.soundNeonColor, setColor(esp, "soundNeonColor"))
 	soundSettings:AddSlider("Neon Power", 0, 100, esp.soundNeonPower, set(esp, "soundNeonPower"), "%")
 	soundSettings:AddSlider("Neon Size", 1, 100, esp.soundNeonSize, set(esp, "soundNeonSize"), "%")
+	tip(enemy:AddToggleColorpicker("Real Position", esp.realPos, esp.realPosColor, set(esp, "realPos"), setColor(esp, "realPosColor")), "Ring where the server most likely has a moving enemy now (replicated position plus ping lead)")
 	local lastSeen = enemy:AddToggleColorpicker("Last Seen", esp.lastSeen, esp.lastSeenColor, set(esp, "lastSeen"), setColor(esp, "lastSeenColor"))
 	tip(lastSeen, "Afterimage of an enemy where you saw him last (and where he was heard), with the time since")
 	local lastSeenSettings = lastSeen:AddSettings()
@@ -16973,7 +17544,7 @@ function Menu.aimbot(window, hk)
 	tip(FireSettings:AddToggle("Quick Stop", rage.quickStop, set(rage, "quickStop")), "Stops your movement the moment a shot is about to be fired")
 	tip(FireSettings:AddToggle("Quick Scope", rage.quickScope, set(rage, "quickScope")), "Snipers fire right after the scope opens")
 	local OriginSettings = RageMain:AddToggle("Origin Scan", rage.originScan, set(rage, "originScan")):AddSettings()
-	OriginSettings:AddSlider("Range", 1, 9.3, math.clamp(rage.originRange or 2, 1, 9.3), set(rage, "originRange"), " st")
+	OriginSettings:AddSlider("Range", 1, 16, math.clamp(rage.originRange or 8, 1, 16), set(rage, "originRange"), " st")
 	OriginSettings:AddSlider("Scans", 1, 12, rage.originScans or 4, set(rage, "originScans"))
 	OriginSettings:AddDropdown("Mode", { "default", "optimized", "precise" }, rage.originScanMode or "optimized", set(rage, "originScanMode"))
 	tip(OriginSettings:AddToggle("Debug Model", rage.originDebug, set(rage, "originDebug")), "Shows the real shot origin, the scanned point and where the last bullet left from")
@@ -18217,7 +18788,8 @@ function Menu.build()
 			if not name and now > 3 and isfile and readfile then
 				local path = "NeverloseConfig_1__last.txt"
 				local okFile, exists = pcall(isfile, path)
-				local okRead, saved = okFile and exists and pcall(readfile, path)
+				local okRead, saved = false, nil
+				if okFile and exists then okRead, saved = pcall(readfile, path) end
 				if okRead and type(saved) == "string" and saved ~= "" then name = saved end
 			end
 			if not name then return end
@@ -18278,6 +18850,22 @@ function Menu.build()
 
 	pcall(function() window.KeybindList.setEnabled(Neverlose.config.misc.windows) end)
 	pcall(function() window.SpectatorList.setEnabled(Neverlose.config.misc.spectatorList) end)
+
+	-- The Hotkeys pill draws a square blur inset and stacked shadow rings that show up as a hard rectangle behind it.
+	do
+		local nextFix = 0
+		maid:give(runService.Heartbeat:Connect(function()
+			local now = os.clock()
+			if now < nextFix then return end
+			nextFix = now + 0.5
+			local ui = game:GetService("CoreGui"):FindFirstChild("NLUI")
+			local header = ui and ui:FindFirstChild("Keybinds") and ui.Keybinds:FindFirstChild("Header")
+			if not header then return end
+			for _, child in ipairs(header:GetChildren()) do
+				if (child.Name == "BlurArea" or child.Name:find("^ShadowRing")) and child.Visible then child.Visible = false end
+			end
+		end))
+	end
 end
 
 function Neverlose.detach()

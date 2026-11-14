@@ -175,6 +175,8 @@ local function espColors(main)
 		flags = rgb(235, 235, 240), aim = rgb(150, 164, 255), hitboxes = rgb(150, 164, 255), hitboxes2 = rgb(255, 110, 150),
 		snapline = main, headDot = rgb(255, 255, 255),
 		fixedBox = false, fixedW = 46, fixedH = 84, boxPad = 3, tightBox = true,
+		-- Бокс не сжимается меньше этого, даже если модель мелкая или далеко.
+		minWidth = 18, minHeight = 36,
 		glowBox = false, glowBoxColor = main, glowName = false, glowNameColor = main, glowDistance = false, glowDistanceColor = main,
 		glowHealth = false, glowHealthColor = main, glowHealthText = false, glowHealthTextColor = main, glowArmor = false, glowArmorColor = main,
 		glowAmmo = false, glowAmmoColor = main, glowReady = false, glowReadyColor = main, glowSkeleton = false, glowSkeletonColor = main,
@@ -182,6 +184,7 @@ local function espColors(main)
 		glowFlags = false, glowFlagsColor = main, glowAim = false, glowAimColor = main,
 		boxWidth = 100, boxThick = 1, boxGradDir = "Vertical", gradMix = 50, fillAlpha = 26,
 		healthMid = rgb(255, 205, 70), healthGradient = true, hpWidth = 2, armorWidth = 2, ammoWidth = 2, readyWidth = 2,
+		boxRound = 0, hpRound = 0, armorRound = 0, ammoRound = 0, readyRound = 0,
 		skelThick = 1, snapThick = 1, dotSize = 100, iconWidth = 46, iconHeight = 18,
 		nameFont = "Tahoma", nameSize = 12, distanceFont = "Tahoma", distanceSize = 11, healthTextFont = "Tahoma", healthTextSize = 11,
 		weaponFont = "Tahoma", weaponSize = 11, flagsFont = "Tahoma", flagsSize = 11, aimFont = "Tahoma", aimSize = 11,
@@ -196,11 +199,11 @@ Neverlose.config = {
 	rage = {
 		enabled = false, fov = 180, priority = "Distance", showFov = false, delayWait = { "Hit Chance" }, delayDamage = 50, delayChance = 60, delayMax = 400,
 		silent = false, silentAuto = true, silentHitChance = 100, silentHitbox = "Head",
-		autoFire = false, autowall = false, wallMinDamage = 25,
+		autoFire = false, autowall = false, wallMinDamage = 15,
 		target = "Highest Damage", hitboxes = "Head, Chest, Stomach", multipoint = "Head, Chest, Stomach",
 		hitChance = 50, minDamage = 15, quickStop = false, quickScope = false,
 		history = "High", bodyAfterMiss = true, autoHitChance = true, delayShot = {}, noRecoil = false, recoilReduction = 100, noSpread = false,
-		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 2, maxWalls = 2, peekReturn = "Shot",
+		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 2, originDebug = false, maxWalls = 2, peekReturn = "Shot",
 		preferBodyLethal = false, preferHead = true, multiTarget = false, scanHz = 30, minDmgOverride = false, minDmgOverrideValue = 5,
 		autoReload = false, reloadAt = 1, remoteReload = false, instaReload = false, reloadSpeed = 3,
 		hitboxList = { "Head", "Chest", "Stomach" }, multipointList = { "Head", "Chest" },
@@ -1049,8 +1052,11 @@ function Ballistics.trace(origin, direction, range, targetCharacter, maxWalls)
 			if bonus == 0 and reactor then bonus = -1 end
 			local thickness = (back.Position - result.Position).Magnitude
 			spent[key] = (spent[key] or 0) + thickness
+			-- Safe-режим нужен только чтобы не отправлять заведомо невозможный
+			-- выстрел. Слишком большой запас (0.78) отсекал валидные пробития,
+			-- из-за чего автоволл "не видел" стены, которые сервер принимал.
 			local margin, slack = 0.88, 0.06
-			if Ballistics.safe then margin, slack = 0.78, 0.1 end
+			if Ballistics.safe then margin, slack = 0.84, 0.07 end
 			if spent[key] > (bonus + penetration) * margin - slack then return hits, false, walls, penalty end
 
 			if not Ballistics.isGlass(part) then
@@ -1078,8 +1084,11 @@ function Ballistics.wallResult(name, walls, accepted)
 	end
 	st.wallFail = (st.wallFail or 0) + 1
 	Ballistics.wallFails[key] = (Ballistics.wallFails[key] or 0) + 1
-	if Ballistics.wallFails[key] >= 2 then
-		Ballistics.wallLimit[name] = { limit = walls - 1, expires = os.clock() + 45 }
+	-- Три отказа подряд по одному и тому же числу стен — только тогда это
+	-- похоже на серверный лимит, а не на разброс или бегущую цель. Раньше
+	-- хватало двух промахов, и автоволл душился на 45 секунд.
+	if Ballistics.wallFails[key] >= 3 then
+		Ballistics.wallLimit[name] = { limit = math.max(walls - 1, 0), expires = os.clock() + 20 }
 		Ballistics.wallFails[key] = 0
 	end
 end
@@ -1117,18 +1126,21 @@ end
 
 function Ballistics.allowedWalls(weapon, enabled, cap)
 	if not enabled then return 0 end
-	local penetration = weapon and weapon.Properties and weapon.Properties.Penetration or 0
-	local base
-	if Game.serverHits then
+	local config = Neverlose.config.rage
+	-- Сколько стен вообще считать, задаёт пользователь (Max Walls). Реальную
+	-- возможность пробития проверяет Ballistics.trace — по материалу, толщине
+	-- и Penetration оружия. Раньше здесь была эвристика от Penetration/10,
+	-- которая при Penetration 0.9 (SSG 08) резала всё до одной стены, хотя
+	-- WallbangMultiplier 0.98 позволяет пробивать заметно больше.
+	local base = tonumber(cap) or tonumber(config.maxWalls) or 2
+	base = math.clamp(math.floor(base), 0, 4)
+	if base <= 0 then return 0 end
 
-		base = penetration > 0 and math.min(cap or 2, 2) or 0
-	else
-		base = cap or 4
-	end
-	base = math.min(base, Neverlose.config.rage.maxWalls or 1)
-
+	-- Мягкий выученный лимит: сервер уже отклонял пробития с таким числом стен.
+	-- Живёт 20 секунд, чтобы одна неудачная серия не отключала автоволл на
+	-- весь матч, и восстанавливается первым же успешным пробитием.
 	local learned = weapon and Ballistics.wallLimit[weapon.Name]
-	if learned and os.clock() < learned.expires then return math.min(base, learned.limit) end
+	if learned and os.clock() < learned.expires then return math.max(math.min(base, learned.limit), 0) end
 	return base
 end
 
@@ -3086,14 +3098,17 @@ function ShotTracker.logMiss(entity, shot)
 	if shot.info and shot.info.mode == "rapid fire" and (shot.walls or 0) == 0 and not shot.info.blocked then Events.fire("rapidRejected") end
 	if shot.taps == 2 then Events.fire("tapRejected", entity, shot) end
 	Ballistics.wallResult(shot.weapon, shot.walls or 0, false)
-	if (shot.walls or 0) > 0 and shot.wallParts and reason ~= "target died" then
-		local expires = os.clock() + 25
+	if (shot.walls or 0) > 0 and shot.wallParts and (reason == "penetration" or reason == "blocked by geometry") then
+		local expires = os.clock() + 8
 		for _, wallPart in ipairs(shot.wallParts) do Ballistics.blocked[wallPart] = expires end
 	end
+	-- Промах по смещённому origin — это чаще разброс или движущаяся цель, а не
+	-- отказ сервера. Раньше он урезал радиус поиска и origin scan фактически
+	-- выключался после пары промахов.
 	if shot.info and shot.info.shifted and reason ~= "target died" and Neverlose.Rage then
-		Neverlose.Rage.originScale = math.max((Neverlose.Rage.originScale or 1) * 0.7, 0.3)
-		Neverlose.Rage.originScaleAt = os.clock()
-		if shot.info.shiftMag then Neverlose.Rage.learnOrigin(false, shot.info.shiftMag) end
+		Neverlose.Rage.learnOrigin(false, shot.info.shiftMag)
+		Neverlose.Rage.noteProbe(false, reason, shot.info.shiftMag)
+		Neverlose.Rage.learnServerShift(false, reason, shot.info.shiftMag)
 	end
 end
 
@@ -3167,6 +3182,11 @@ maid:give(runService.Heartbeat:Connect(function()
 			if Neverlose.lastKnown then Neverlose.lastKnown[entity] = nil end
 			if Neverlose.Rage and Neverlose.Rage.missStreak then Neverlose.Rage.missStreak[entity] = nil end
 			Ballistics.wallResult(shot.weapon, shot.walls or 0, true)
+			if shot.info and shot.info.shiftMag and Neverlose.Rage then
+				Neverlose.Rage.learnOrigin(true, shot.info.shiftMag)
+				Neverlose.Rage.noteProbe(true, nil, shot.info.shiftMag)
+				Neverlose.Rage.learnServerShift(true, nil, shot.info.shiftMag)
+			end
 			if shot.taps == 2 then Events.fire("tapAccepted", entity, shot) end
 			local soul = Neverlose.config.esp.enemyModel.soul
 			if soul.on and character then
@@ -3178,13 +3198,22 @@ maid:give(runService.Heartbeat:Connect(function()
 			local drop = shot.hp - health
 			markerUntil, markerKill = now + 0.35, false
 			playHitSound("hit", shot.part)
-			if shot.info and shot.info.shiftMag and Neverlose.Rage then Neverlose.Rage.learnOrigin(true, shot.info.shiftMag) end
+			if shot.info and shot.info.shiftMag and Neverlose.Rage then
+				Neverlose.Rage.learnOrigin(true, shot.info.shiftMag)
+				Neverlose.Rage.noteProbe(true, nil, shot.info.shiftMag)
+				Neverlose.Rage.learnServerShift(true, nil, shot.info.shiftMag)
+			end
 			Logs.push("Combat", ("hit {%s} in the %s for {%d} damage ({%d} health left)"):format(name, bodyPhrase(shot.part), drop, math.max(math.floor(health + 0.5), 0)))
 			pcall(HitEffects.world, shot.hitPos, false)
 			pcall(Neverlose.Vfx.hit, shot.hitPos, shot.part, false)
 			Events.fire("hit", entity, shot, drop)
 			if Neverlose.Rage and Neverlose.Rage.missStreak then Neverlose.Rage.missStreak[entity] = nil end
 			Ballistics.wallResult(shot.weapon, shot.walls or 0, true)
+			-- Успешное пробитие снимает чёрную метку со стены: раньше она
+			-- оставалась "заблокированной" даже после попадания.
+			if shot.wallParts then
+				for _, wallPart in ipairs(shot.wallParts) do Ballistics.blocked[wallPart] = nil end
+			end
 			if shot.info and shot.info.mode == "rapid fire" then Events.fire("rapidAccepted") end
 			if shot.taps == 2 then
 				local landed = not shot.expect or drop >= shot.expect * 1.5
@@ -3237,7 +3266,7 @@ if shootRemote and type(shootRemote.Send) == "function" then
 						local rageConfig = Neverlose.config.rage
 						local forced = focus and rageConfig.enabled and rageConfig.autoFire and {
 							entity = focus.entity, part = focus.part and focus.part.Name, chance = focus.chance,
-							distance = focus.distance, record = focus.record ~= nil, mode = "silent", shifted = focus.origin ~= nil, shiftMag = focus.origin and (focus.origin - currentCamera.CFrame.Position).Magnitude or nil,
+							distance = focus.distance, record = focus.record ~= nil, mode = "silent", shifted = focus.origin ~= nil, shiftMag = focus.origin and (focus.origin - Game.origin()).Magnitude or nil,
 						} or nil
 						Neverlose.stats = Neverlose.stats or {}
 						Neverlose.stats.sent = (Neverlose.stats.sent or 0) + 1
@@ -3407,34 +3436,236 @@ originOverlap.FilterType = Enum.RaycastFilterType.Exclude
 
 ---True when a shifted shot origin is not inside solid geometry.
 function Rage.originClear(position)
-	originOverlap.FilterDescendantsInstances = { localPlayer.Character, currentCamera }
+	-- ignoreList сам пропускает nil-персонажа и кэшируется, поэтому здесь
+	-- больше нет падения "Array contains nil" во время респавна.
+	originOverlap.FilterDescendantsInstances = Ballistics.ignoreList()
 	for _, part in ipairs(workspaceService:GetPartBoundsInRadius(position, 0.3, originOverlap)) do
 		if part.CanCollide and not isPassThrough(part) then return false end
 	end
 	return true
 end
 
----Learns the largest shot-origin offset the server accepts: a rejected shifted shot pulls the cap under its offset, accepted shots near the cap push it back up.
-function Rage.learnOrigin(accepted, magnitude)
-	local config = Neverlose.config.rage
-	local limit = config.originRange or 2
-	local cap = Rage.originCap or config.originCap or limit
-	if type(magnitude) ~= "number" or magnitude < 0.3 then return end
-	local before = cap
-	if accepted then
-		Rage.originAccepted = math.max(Rage.originAccepted or 0, magnitude)
-		if magnitude >= cap * 0.85 then cap = math.min(limit, cap + 0.08) end
-	else
-		Rage.originRejected = math.min(Rage.originRejected or math.huge, magnitude)
-		cap = math.max(0.4, math.min(cap, magnitude * 0.85))
+---Отчёт для подбора Range: сколько места вокруг, из каких точек видно вперёд
+---и как часто сервер принимал смещённые выстрелы. Возвращает текст.
+function Rage.probeOrigin()
+	local out = {}
+	local function line(fmt, ...)
+		if select("#", ...) > 0 then
+			out[#out + 1] = fmt:format(...)
+		else
+			out[#out + 1] = fmt
+		end
 	end
-	Rage.originCap, config.originCap = cap, cap
-	if math.abs(cap - before) >= 0.25 then Logs.push("Combat", ("origin threshold {%.1f} st"):format(cap)) end
+	local origin = Game.origin()
+	local camera = currentCamera.CFrame
+	local weapon = Game.weapon()
+	local properties = weapon and weapon.Properties
+	local character = Game.localCharacter()
+	local cameraPart = localPlayer.Character and localPlayer.Character:FindFirstChild("CameraPart")
+
+	line("=== NEV ORIGIN PROBE ===")
+	line("time: %s", os.date("%Y-%m-%d %H:%M:%S"))
+	line("game: %s | place: %s | map: %s | serverHits: %s", tostring(game.Name), tostring(game.PlaceId),
+		tostring(workspaceService:GetAttribute("Map")), tostring(Game.serverHits))
+	line("origin: %.2f %.2f %.2f", origin.X, origin.Y, origin.Z)
+	line("cameraPart: %s | camera->origin: %.2f", cameraPart and "yes" or "no", (camera.Position - origin).Magnitude)
+	if character then
+		local root, head = character:FindFirstChild("HumanoidRootPart"), character:FindFirstChild("Head")
+		line("root->origin: %.2f | head->origin: %.2f",
+			root and (root.Position - origin).Magnitude or -1, head and (head.Position - origin).Magnitude or -1)
+	end
+	line("originScan: %s | Range: %.1f | reach: %.1f", tostring(Neverlose.config.rage.originScan),
+		tonumber(Neverlose.config.rage.originRange) or 0, Rage.originReach())
+	if properties then
+		line("weapon: %s", tostring(weapon.Name))
+		line("  Penetration: %s | Range: %s | Wallbang: %s | ArmorPen: %s | Bullets: %s",
+			tostring(properties.Penetration), tostring(properties.Range), tostring(properties.WallbangMultiplier),
+			tostring(properties.ArmorPenetration), tostring(properties.BulletsPerShot))
+		line("  allowedWalls: %d | MaxWalls setting: %s | WallMinDamage: %s",
+			Ballistics.allowedWalls(weapon, Neverlose.config.rage.autowall),
+			tostring(Neverlose.config.rage.maxWalls), tostring(Neverlose.config.rage.wallMinDamage))
+	end
+
+	-- Куда смотрим: тестовый «угол» в 60 стадах по направлению камеры.
+	local look = camera.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	if flat.Magnitude < 0.01 then flat = Vector3.zAxis else flat = flat.Unit end
+	local side = Vector3.yAxis:Cross(flat).Unit
+	local probePoint = origin + flat * 60
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = Ballistics.ignoreList()
+	local function clearFrom(from)
+		return workspaceService:Raycast(from, probePoint - from, rayParams) == nil
+	end
+
+	line("-- space around you (radius / free points / points with clear line) --")
+	local maxUseful = 0
+	for radius = 1, 9 do
+		local free, see = 0, 0
+		for step = 0, 11 do
+			local angle = step / 12 * math.pi * 2
+			local point = origin + (flat * math.cos(angle) + side * math.sin(angle)) * radius
+			if Rage.originClear(point) then
+				free += 1
+				if clearFrom(point) then see += 1 end
+			end
+		end
+		if see > 0 then maxUseful = radius end
+		line("  %2d st: free %2d/12 | line %2d/12", radius, free, see)
+	end
+	line("max radius with at least one clear line: %d st", maxUseful)
+
+	-- Насколько близко геометрия: по этому видно, стоишь ли ты вообще у укрытия.
+	local nearest = {}
+	for step = 0, 7 do
+		local angle = step / 8 * math.pi * 2
+		local dir = (flat * math.cos(angle) + side * math.sin(angle)).Unit
+		local hit = workspaceService:Raycast(origin, dir * 12, rayParams)
+		nearest[#nearest + 1] = ("%d°:%.1f"):format(step * 45, hit and (hit.Position - origin).Magnitude or 12)
+	end
+	line("-- nearest geometry within 12 st --")
+	line("  " .. table.concat(nearest, " | "))
+
+	local target = Rage.target
+	line("-- current target --")
+	if target and target.part and target.part.Parent then
+		local aim = Rage.aimPoint(target)
+		local distance = aim and (aim - origin).Magnitude or 0
+		local maxWalls = Ballistics.allowedWalls(weapon, Neverlose.config.rage.autowall)
+		if aim and distance > 0.1 then
+			local direction = (aim - origin).Unit
+			local _, reached, walls = Ballistics.trace(origin, direction, distance + 2, target.character, maxWalls)
+			line("  direct: %s | walls %d | %.1f st", reached and "visible" or "blocked", walls, distance)
+			local rank = Rage.originRank and Rage.originRank[target.entity]
+			if rank and rank.shifts and #rank.shifts > 0 then
+				for index = 1, math.min(#rank.shifts, 4) do
+					local shift = rank.shifts[index]
+					local from = origin + shift
+					local lineDir = aim - from
+					local _, fromReached, fromWalls = Ballistics.trace(from, lineDir.Unit, lineDir.Magnitude + 2, target.character, maxWalls)
+					line("  scan %.1f st: %s | walls %d", shift.Magnitude, fromReached and "visible" or "blocked", fromWalls)
+				end
+			else
+				line("  scan: no point cached (direct line open or too far)")
+			end
+		end
+	else
+		line("  no target (rage off / nobody in FOV)")
+	end
+
+	local data = Rage.originProbeData
+	line("-- shifted shots --")
+	if not data or (data.hits + data.misses) == 0 then
+		line("  no shifted shots recorded yet")
+	else
+		local total = data.hits + data.misses
+		line("  hits %d | misses %d | %.0f%%", data.hits, data.misses, data.hits / total * 100)
+		local keys = {}
+		for key in pairs(data.buckets) do keys[#keys + 1] = key end
+		table.sort(keys)
+		for _, key in ipairs(keys) do
+			local bucket = data.buckets[key]
+			local count = bucket.ok + bucket.fail
+			line("  %.1f-%.1f st: %d/%d (%.0f%%)", key, key + 0.5, bucket.ok, count, bucket.ok / count * 100)
+		end
+		local reasons = {}
+		for reason, count in pairs(data.reasons) do reasons[#reasons + 1] = { reason, count } end
+		table.sort(reasons, function(a, b) return a[2] > b[2] end)
+		for index = 1, math.min(#reasons, 6) do
+			line("  miss reason: %s x%d", reasons[index][1], reasons[index][2])
+		end
+	end
+	line("=== END ===")
+	return table.concat(out, "\n")
 end
 
+---Пассивная телеметрия origin: по каким смещениям попадаем, а по каким нет.
+---Нужна для отчёта, чтобы подбирать Range по реальным данным, а не на глаз.
+function Rage.noteProbe(hit, reason, magnitude)
+	local data = Rage.originProbeData
+	if not data then
+		data = { hits = 0, misses = 0, reasons = {}, buckets = {} }
+		Rage.originProbeData = data
+	end
+	if hit then data.hits += 1 else data.misses += 1 end
+	local mag = tonumber(magnitude)
+	if mag and mag > 0 then
+		local key = math.floor(mag * 2 + 0.5) / 2
+		local bucket = data.buckets[key]
+		if not bucket then bucket = { ok = 0, fail = 0 } data.buckets[key] = bucket end
+		if hit then bucket.ok += 1 else bucket.fail += 1 end
+	end
+	if not hit and reason then
+		data.reasons[reason] = (data.reasons[reason] or 0) + 1
+	end
+end
+
+---Статистика по смещённым выстрелам. Раньше промах урезал рабочий диапазон
+---и ронял масштаб поиска до 30% на десятки секунд — из-за этого скан
+---"умирал" после пары промахов по движущейся цели.
+function Rage.learnOrigin(accepted, magnitude)
+	if type(magnitude) ~= "number" or magnitude < 0.3 then return end
+	if accepted then
+		Rage.originAccepted = math.max(Rage.originAccepted or 0, magnitude)
+		Rage.originMissStreak = 0
+	else
+		Rage.originRejected = math.max(Rage.originRejected or 0, magnitude)
+		Rage.originMissStreak = (Rage.originMissStreak or 0) + 1
+	end
+end
+
+---Рабочий радиус поиска смещённого origin. Уважаем настройку и не
+---схлопываемся от обычных промахов. Отдельно учитываем серверный потолок —
+---он снижается только после серии отказов регистрации и медленно растёт.
 function Rage.originReach()
-	local config = Neverlose.config.rage
-	return math.min(config.originRange or 2, Rage.originCap or config.originCap or math.huge)
+	local reach = math.clamp(tonumber(Neverlose.config.rage.originRange) or 2, 0.5, 9.3)
+	if type(Rage.originCap) == "number" then reach = math.min(reach, Rage.originCap) end
+
+	local cap = Rage.shiftCap
+	if type(cap) == "number" then
+		if os.clock() - (Rage.shiftCapAt or 0) > 15 then
+			cap = math.min(reach, cap + 0.5)
+			Rage.shiftCap, Rage.shiftCapAt = cap, os.clock()
+		end
+		reach = math.min(reach, cap)
+	end
+	return math.clamp(reach, 0.5, 9.3)
+end
+
+---Серверный лимит сдвига. Считаем только промахи, похожие на отказ
+---регистрации выстрела, а не разброс/предикт — иначе скан снова начнёт
+---схлопываться от обычных миссов. После трёх таких отказов потолок
+---опускается на 0.35 стада, после успешных выстрелов — поднимается.
+local shiftRejectReasons = {
+	["unregistered shot"] = true,
+	["lag compensation"] = true,
+	["direct shot not registered"] = true,
+	["blocked by geometry"] = true,
+}
+
+function Rage.learnServerShift(accepted, reason, magnitude)
+	if not Game.serverHits then return end
+	local mag = tonumber(magnitude)
+	if not mag or mag < 1 then return end
+	if accepted then
+		Rage.shiftStreak = 0
+		local cap = Rage.shiftCap
+		if type(cap) == "number" and mag >= cap - 0.6 then
+			Rage.shiftCap = math.min(9.3, cap + 0.15)
+			Rage.shiftCapAt = os.clock()
+		end
+		return
+	end
+	if not shiftRejectReasons[reason] then return end
+	Rage.shiftStreak = (Rage.shiftStreak or 0) + 1
+	if Rage.shiftStreak >= 3 then
+		local cap = math.min(Rage.shiftCap or mag, mag) - 0.35
+		Rage.shiftCap = math.max(1, cap)
+		Rage.shiftStreak = 0
+		Rage.shiftCapAt = os.clock()
+		Logs.push("Combat", ("origin server cap {%.1f} st"):format(Rage.shiftCap))
+	end
 end
 
 function Rage.originShifts()
@@ -3473,35 +3704,183 @@ function Rage.originShifts()
 end
 
 function Rage.originShiftsFor(toward)
-	local scale = Rage.originScale or 1
-	local reach = Rage.originReach() * scale
+	local reach = Rage.originReach()
 	local flat = Vector3.new(toward.X, 0, toward.Z)
 	if flat.Magnitude < 0.1 then flat = Vector3.new(currentCamera.CFrame.LookVector.X, 0, currentCamera.CFrame.LookVector.Z) end
 	local forward = flat.Magnitude > 0.01 and flat.Unit or Vector3.zAxis
-	local side, up = Vector3.yAxis:Cross(forward), Vector3.yAxis
+	local side = Vector3.yAxis:Cross(forward)
+	if side.Magnitude < 0.01 then side = Vector3.xAxis end
+	side = side.Unit
+	local up = Vector3.yAxis
+	-- Полный круг по 12 азимутам на каждом радиусе + приподнятый круг и
+	-- вертикаль. Раньше было 7 направлений (в основном вбок), из-за чего
+	-- реальный край укрытия часто не находился.
 	local shifts = {}
-	for _, factor in ipairs({ 0.25, 0.5, 0.75, 1 }) do
+	local azimuths = 12
+	for _, factor in ipairs({ 0.35, 0.6, 0.85, 1 }) do
 		local r = reach * factor
-		for _, shift in ipairs({
-			side * r, -side * r, up * r * 0.6, side * r * 0.6 + up * r * 0.5, -side * r * 0.6 + up * r * 0.5,
-			(side + forward) * r * 0.7, (-side + forward) * r * 0.7, forward * r,
-		}) do
-			shifts[#shifts + 1] = shift
-		end
-	end
-	local velocity = Rage.selfVelocity
-	if velocity then
-		local move = Vector3.new(velocity.X, 0, velocity.Z)
-		if move.Magnitude > 3 then
-			if move.Magnitude * 0.12 > reach * 1.5 then move = move.Unit * (reach * 1.5 / 0.12) end
-			shifts[#shifts + 1] = move * 0.06
-			shifts[#shifts + 1] = move * 0.12
+		if r > 0.35 then
+			for step = 0, azimuths - 1 do
+				local angle = (step / azimuths) * math.pi * 2
+				local dir = forward * math.cos(angle) + side * math.sin(angle)
+				shifts[#shifts + 1] = dir * r
+				if factor >= 0.6 then
+					shifts[#shifts + 1] = (dir + up * 0.85).Unit * r
+				end
+			end
+			shifts[#shifts + 1] = up * r
 		end
 	end
 	return shifts
 end
 
 Rage.threat, Rage.suspect = {}, {}
+
+---Debug-модель origin: в мире видно, откуда пуля реально уходит.
+---Зелёный маркер — камера/CameraPart, синий — лучшая найденная точка
+---origin scan, оранжевый — точка, ушедшая в последний выстрел.
+Rage.debugModel = { parts = {}, adorns = {}, label = nil, at = 0 }
+
+local debugColors = {
+	real = Color3.fromRGB(80, 255, 120),
+	scan = Color3.fromRGB(90, 165, 255),
+	shot = Color3.fromRGB(255, 170, 60),
+	fail = Color3.fromRGB(255, 80, 80),
+}
+
+local function debugPart(index)
+	local store = Rage.debugModel.parts
+	local part = store[index]
+	if part and part.Parent then return part end
+	part = newInstance("Part", {
+		Name = randomName(), Anchored = true, CanCollide = false, CanQuery = false,
+		CanTouch = false, CastShadow = false, Massless = true, Locked = true,
+		Transparency = 1, Size = Vector3.one, Parent = effectsFolder,
+	})
+	store[index] = part
+	return part
+end
+
+local function debugAdorn(index, color, size)
+	local store = Rage.debugModel.adorns
+	local adorn = store[index]
+	if not (adorn and adorn.Parent) then
+		adorn = newInstance("BoxHandleAdornment", {
+			AlwaysOnTop = true, ZIndex = 3, Transparency = 0.1,
+		}, effectsFolder)
+		store[index] = adorn
+	end
+	adorn.Color3, adorn.Size = color, Vector3.new(size, size, size)
+	return adorn
+end
+
+local function hideDebug()
+	for index = 1, 3 do
+		local adorn = Rage.debugModel.adorns[index]
+		if adorn then adorn.Visible = false end
+	end
+	local beamA, beamB = Rage.debugModel.parts[4], Rage.debugModel.parts[5]
+	if beamA then beamA.Transparency = 1 end
+	if beamB then beamB.Transparency = 1 end
+	local label = Rage.debugModel.label
+	if label then label.Visible = false end
+end
+
+---Ставит светящийся маркер в мир. Части служат только якорями для
+---адорнментов, поэтому их самих не видно (Transparency = 1).
+local function debugMarker(index, position, color)
+	local part = debugPart(index)
+	part.CFrame = CFrame.new(position)
+	local adorn = debugAdorn(index, color, 0.3)
+	adorn.Adornee, adorn.Visible = part, true
+end
+
+---Луч между двумя точками — обычная тонкая неоновая часть.
+local function debugBeam(index, from, to, color)
+	local part = debugPart(index)
+	local delta = to - from
+	local length = delta.Magnitude
+	if length < 0.05 then part.Transparency = 1 return end
+	part.Size = Vector3.new(0.06, 0.06, length)
+	local up = math.abs(delta.Unit.Y) > 0.99 and Vector3.xAxis or Vector3.yAxis
+	part.CFrame = CFrame.lookAt(from + delta * 0.5, to, up)
+	part.Color, part.Material, part.Transparency = color, Enum.Material.Neon, 0.45
+end
+
+function Rage.updateDebug()
+	local config = Neverlose.config.rage
+	local dbg = Rage.debugModel
+	if not (config.originDebug and Game.localCharacter()) then hideDebug() return end
+
+	local now = os.clock()
+	if now - (dbg.at or 0) < 0.016 then return end
+	dbg.at = now
+
+	local real = Game.origin()
+	local target = Rage.target
+	local shot = Rage.shotDebug and now - Rage.shotDebug.at < 0.75 and Rage.shotDebug or nil
+	local fail = not shot and Rage.aimFail and now - Rage.aimFail.at < 0.5 and Rage.aimFail or nil
+	local scan
+	if target then
+		if target.origin then
+			scan = target.origin
+		else
+			local rank = Rage.originRank and Rage.originRank[target.entity]
+			if rank and rank.shifts and rank.shifts[1] then scan = real + rank.shifts[1] end
+		end
+	end
+	if shot and shot.origin then scan = shot.origin end
+
+	debugMarker(1, real, debugColors.real)
+	if scan and (scan - real).Magnitude > 0.05 then
+		debugMarker(2, scan, debugColors.scan)
+		debugBeam(4, real, scan, debugColors.scan)
+	else
+		local adorn = dbg.adorns[2]
+		if adorn then adorn.Visible = false end
+		local beam = dbg.parts[4]
+		if beam then beam.Transparency = 1 end
+	end
+
+	local attempt = shot or fail
+	if attempt then
+		local color = shot and debugColors.shot or debugColors.fail
+		debugMarker(3, attempt.origin, color)
+		debugBeam(5, attempt.origin, attempt.aim, color)
+	else
+		local adorn = dbg.adorns[3]
+		if adorn then adorn.Visible = false end
+		local beam = dbg.parts[5]
+		if beam then beam.Transparency = 1 end
+	end
+
+	local label = dbg.label
+	if not label then
+		label = draw("Text", {
+			Text = "", Visible = false, Center = true, Outline = true, Size = 13,
+			Font = 2, Color = Color3.fromRGB(255, 255, 255),
+		})
+		dbg.label = label
+	end
+	local anchor = (attempt and attempt.origin) or scan or real
+	local point, onScreen = currentCamera:WorldToViewportPoint(anchor)
+	local offset = scan and (scan - real).Magnitude or 0
+	label.Visible = onScreen == true
+	if label.Visible then
+		if fail then
+			label.Text = ("origin blocked · %.1f st"):format((fail.origin - real).Magnitude)
+			label.Color = debugColors.fail
+		else
+			label.Text = ("origin %.1f st"):format(offset)
+			label.Color = offset > 0.05 and debugColors.scan or debugColors.real
+		end
+		label.Position = Vector2.new(point.X, point.Y - 22)
+	end
+end
+
+maid:give(runService.RenderStepped:Connect(function()
+	pcall(Rage.updateDebug)
+end))
 
 function Rage.threatOf(entity)
 	local record = Rage.threat[entity]
@@ -3618,8 +3997,8 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 	local minDamage = Rage.minDamage()
 	local validOrigins, validShifts = {}, {}
 	Ballistics.safe = true
-	Rage.originBudget = 2
-	originParams.FilterDescendantsInstances = { localPlayer.Character, currentCamera }
+	Rage.originBudget = 1
+	originParams.FilterDescendantsInstances = Ballistics.ignoreList()
 	local activeOrigins = validOrigins
 	Rage.originRank = Rage.originRank or {}
 
@@ -3695,49 +4074,85 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 
 				activeOrigins = validOrigins
 				if config.originScan then
-					local cached = Rage.originRank[entity]
-					local age = cached and os.clock() - cached.at
-					if cached and (age < 0.08 or (Rage.originBudget <= 0 and age < 0.4)) then
-						activeOrigins = {}
-						for _, shift in ipairs(cached.shifts) do
-							if workspaceService:Raycast(origin, shift, originParams) == nil then activeOrigins[#activeOrigins + 1] = origin + shift end
-						end
-					else
-						Rage.originBudget -= 1
-						local root, head = character:FindFirstChild("HumanoidRootPart"), character:FindFirstChild("Head")
-						local chest = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
-						local picked = {}
-						if root then
-							local direct = root.Position - origin
-							local _, directReached, directWalls = Ballistics.trace(origin, direct.Unit, direct.Magnitude + 2, character, maxWalls)
-							if not directReached or directWalls > 0 then
-								local ranked, clean = {}, 0
-								for _, shift in ipairs(Rage.originShiftsFor(direct)) do
-									if workspaceService:Raycast(origin, shift, originParams) == nil and Rage.originClear(origin + shift) then
-										local from = origin + shift
-										local best, seen = 50, 0
-										for _, mark in ipairs({ root, head, chest }) do
-											local line = mark.Position - from
-											local _, reachedFrom, wallsFrom = Ballistics.trace(from, line.Unit, line.Magnitude + 2, character, maxWalls)
-											if reachedFrom then
-												seen += 1
-												if wallsFrom < best then best = wallsFrom end
-											end
+					local root = character:FindFirstChild("HumanoidRootPart")
+					local head = character:FindFirstChild("Head")
+					local chest = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+					local blocked = true
+					if root then
+						local direct = root.Position - origin
+						local _, directReached, directWalls = Ballistics.trace(origin, direct.Unit, direct.Magnitude + 2, character, maxWalls)
+						blocked = (not directReached) or (directWalls or 0) > 0
+					end
+
+					-- Сканируем только когда прямой прострел реально закрыт: иначе
+					-- это лишние рейкасты каждый кадр.
+					if blocked and root and (root.Position - origin).Magnitude < 250 then
+						local view = currentCamera.CFrame
+						local cached = Rage.originRank[entity]
+						local stale = not cached
+							or not cached.camPos or not cached.camLook
+							or os.clock() - cached.at > 0.35
+							or (cached.camPos - view.Position).Magnitude > 0.6
+							or cached.camLook:Dot(view.LookVector) < 0.995
+							or (cached.rootPos and root and (cached.rootPos - root.Position).Magnitude > 2)
+
+						if stale and Rage.originBudget > 0 then
+							Rage.originBudget -= 1
+							local ranked, clean = {}, 0
+							for _, shift in ipairs(Rage.originShiftsFor(root and (root.Position - origin) or view.LookVector)) do
+								local from = origin + shift
+								-- Важна только сама точка: она не должна быть внутри
+								-- геометрии. Путь от камеры до неё может быть перекрыт —
+								-- именно так и стреляют из-за угла, не высовываясь.
+								if Rage.originClear(from) then
+									local pathClear = workspaceService:Raycast(origin, shift, originParams) == nil
+									local function wallsTo(mark)
+										if not mark then return nil end
+										local line = mark.Position - from
+										local _, reachedFrom, wallsFrom = Ballistics.trace(from, line.Unit, line.Magnitude + 2, character, maxWalls)
+										return reachedFrom and wallsFrom or nil
+									end
+									-- Сначала корпус: если он не простреливается, голова и
+									-- грудь дадут тот же отказ, а рейкасты стоят времени.
+									local rootWalls = wallsTo(root)
+									if rootWalls then
+										local best, seen = rootWalls, 1
+										local headWalls = wallsTo(head)
+										if headWalls then
+											seen += 1
+											if headWalls < best then best = headWalls end
 										end
-										if best < 50 then
-											ranked[#ranked + 1] = { shift = shift, score = best * 2 + shift.Magnitude * 0.35 - seen * 0.2 }
-											if best == 0 then clean += 1 end
+										local chestWalls = wallsTo(chest)
+										if chestWalls then
+											seen += 1
+											if chestWalls < best then best = chestWalls end
 										end
-										if clean >= 3 then break end
+										local score = best * 2 + shift.Magnitude * 0.35 - seen * 0.2
+										if not pathClear then score += 4 end
+										-- Точка, из которой видна голова, ценнее точки,
+										-- где простреливается только корпус.
+										if headWalls == 0 then score -= 1.2 end
+										ranked[#ranked + 1] = { shift = shift, score = score }
+										if best == 0 then clean += 1 end
+										if clean >= 2 then break end
 									end
 								end
-								table.sort(ranked, function(a, b) return a.score < b.score end)
-								for index = 1, math.min(6, #ranked) do picked[index] = ranked[index].shift end
+							end
+							table.sort(ranked, function(a, b) return a.score < b.score end)
+							local picked = {}
+							for index = 1, math.min(4, #ranked) do picked[index] = ranked[index].shift end
+							cached = { at = os.clock(), shifts = picked, camPos = view.Position, camLook = view.LookVector, rootPos = root and root.Position or nil }
+							Rage.originRank[entity] = cached
+						end
+
+						activeOrigins = {}
+						if cached then
+							for _, shift in ipairs(cached.shifts) do
+								-- Точки уже проверены при скане и живут в кэше не дольше
+								-- 0.35 с, так что здесь лишние overlap-запросы не нужны.
+								activeOrigins[#activeOrigins + 1] = origin + shift
 							end
 						end
-						activeOrigins = {}
-						for index, shift in ipairs(picked) do activeOrigins[index] = origin + shift end
-						Rage.originRank[entity] = { at = os.clock(), shifts = picked }
 					end
 				end
 
@@ -3807,9 +4222,13 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 					end
 					if chosen.damage >= chosen.health then score -= (config.target == "Highest Damage" or config.target == "Lowest Health") and 150 or (config.target == "Crosshair" and 400 or 25) end
 					if true then score -= math.min(Rage.threatOf(entity), 8) * 60 end
-					-- A visible shot always beats a wallbang: penetrating only makes
-					-- sense when nothing is exposed.
-					if (chosen.walls or 0) > 0 then score += 100000 end
+					-- Пробитие — запасной вариант, но не абсолютно последний:
+					-- смертельный выстрел через стену должен перебивать
+					-- царапину по открытой цели, иначе автоволл бесполезен.
+					if (chosen.walls or 0) > 0 then
+						local lethal = chosen.damage >= (chosen.health or 100)
+						score += lethal and -80 or (600 + chosen.walls * 150)
+					end
 					chosen.score = score
 					results[#results + 1] = chosen
 				end
@@ -3838,43 +4257,69 @@ function Rage.aimBullet(bullet, target, weapon)
 	local aim = Rage.aimPoint(target)
 	if not aim then return false end
 
-	local origin = typeof(bullet.Origin) == "Vector3" and bullet.Origin or Game.origin()
-	if (origin - Game.origin()).Magnitude > 4 then origin = Game.origin() end
-	if target.origin then origin = target.origin end
-	local offset = aim - origin
-	local distance = offset.Magnitude
-	local range = weapon and weapon.Properties and weapon.Properties.Range or 500
-	if distance < 0.05 or distance > range then return false end
-	local direction = offset.Unit
-
+	local real = Game.origin()
+	local requested = typeof(bullet.Origin) == "Vector3" and bullet.Origin or real
+	if (requested - real).Magnitude > 4 then requested = real end
 	local maxWalls = Ballistics.allowedWalls(weapon, Neverlose.config.rage.autowall)
-	Ballistics.safe = true
-	local hits, reached, walls = Ballistics.trace(origin, direction, distance + 2, target.character, maxWalls)
-	Ballistics.safe = false
-	if not reached and not (target.record and walls <= maxWalls) then return false end
+	local range = weapon and weapon.Properties and weapon.Properties.Range or 500
 
-	if reached and walls == 0 and not target.record and target.part then
-		local inward = target.part.Position - aim
-		if inward.Magnitude > 0.25 then
-			local inner = aim + inward.Unit * 0.2
-			local line = inner - origin
-			local _, innerReached = Ballistics.trace(origin, line.Unit, line.Magnitude + 2, target.character, maxWalls)
-			if not innerReached then return false end
+	local function attempt(from)
+		local offset = aim - from
+		local distance = offset.Magnitude
+		if distance < 0.05 or distance > range then return nil end
+		local direction = offset.Unit
+
+		Ballistics.safe = true
+		local hits, reached, walls = Ballistics.trace(from, direction, distance + 2, target.character, maxWalls)
+		Ballistics.safe = false
+		if not reached and not (target.record and walls <= maxWalls) then return nil end
+
+		if reached and walls == 0 and not target.record and target.part then
+			local inward = target.part.Position - aim
+			if inward.Magnitude > 0.25 then
+				local inner = aim + inward.Unit * 0.2
+				local line = inner - from
+				local _, innerReached = Ballistics.trace(from, line.Unit, line.Magnitude + 2, target.character, maxWalls)
+				if not innerReached then return nil end
+			end
 		end
+		return { from = from, direction = direction, hits = hits, reached = reached, walls = walls }
 	end
 
-	if not reached then
-		hits[#hits + 1] = {
-			Instance = target.part, Position = aim, Normal = -direction,
+	-- Смещённый origin — приоритет, но не единственный вариант. Кэш точки
+	-- живёт 0.35 с; если цель за это время ушла за угол, из смещённой точки
+	-- её уже не прострелить, а из камеры — видно. Раньше такой выстрел
+	-- просто отменялся, и получалось "линия нарисована, пули нет".
+	local best = attempt(requested)
+	if target.origin then
+		local shifted = attempt(target.origin)
+		if shifted and (not best or not best.reached or (shifted.walls or 0) < (best.walls or 0)) then
+			best = shifted
+		end
+	end
+	if not best and requested ~= real then best = attempt(real) end
+	if not best then
+		Rage.aimFail = { at = os.clock(), origin = target.origin or real, aim = aim }
+		return false
+	end
+	Rage.aimFail = nil
+
+	if not best.reached then
+		best.hits[#best.hits + 1] = {
+			Instance = target.part, Position = aim, Normal = -best.direction,
 			Material = target.part.Material.Name, Exit = false,
 		}
 	end
 
-	bullet.Origin, bullet.Direction = origin, direction
+	-- Пишем debug только после успешной проверки: линия = реально ушедший
+	-- выстрел, а не попытка, которую скрипт отменил.
+	Rage.shotDebug = { at = os.clock(), real = real, origin = best.from, aim = aim }
+
+	bullet.Origin, bullet.Direction = best.from, best.direction
 	if Game.serverHits then
 		bullet.Hits = nil
 	else
-		bullet.Hits = Ballistics.withDistances(origin, hits)
+		bullet.Hits = Ballistics.withDistances(best.from, best.hits)
 	end
 	return true
 end
@@ -3971,7 +4416,7 @@ function Rage.remoteFire(weapon, target, tap)
 		local okReg, errReg = pcall(ShotTracker.register, bullet.Origin, bullet.Direction, bullet.Hits or Ballistics.trace(bullet.Origin, bullet.Direction, range, target.character, 2), range, tap, target.damage,
 			{ chance = target.chance, distance = target.distance, record = target.record ~= nil, direct = true,
 				entity = target.entity, part = target.part and target.part.Name, shifted = target.origin ~= nil,
-				shiftMag = target.origin and (target.origin - currentCamera.CFrame.Position).Magnitude or nil,
+				shiftMag = target.origin and (target.origin - Game.origin()).Magnitude or nil,
 				mode = tap == 2 and "double tap" or (Neverlose.config.rage.rapidFire and "rapid fire" or "direct") })
 		if not okReg and os.clock() - (Rage.regErrAt or 0) > 3 then
 			Rage.regErrAt = os.clock()
@@ -6195,7 +6640,7 @@ local function glowLayerStyle(spec, size, power)
 	return math.max(1, spec.thickness * scale), math.clamp(1 - (1 - spec.transparency) * boost, 0, 0.98)
 end
 
-function EspObject:glowRect(key, x, y, w, h, color, size, power)
+function EspObject:glowRect(key, x, y, w, h, color, size, power, round)
 	local kit = self.glowKits[key]
 	if not kit then
 		local made, holder = pcall(newInstance, "Frame", {
@@ -6203,12 +6648,12 @@ function EspObject:glowRect(key, x, y, w, h, color, size, power)
 		}, uiRoot)
 		if not made then return end
 		maid:give(holder)
-		kit = { holder = holder, strokes = {} }
+		kit = { holder = holder, strokes = {}, corners = {} }
 		for index, spec in ipairs(GLOW_LAYERS) do
 			local layer = newInstance("Frame", {
 				Name = randomName(), BackgroundTransparency = 1, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), ZIndex = 0,
 			}, holder)
-			newInstance("UICorner", { CornerRadius = UDim.new(0, spec.radius) }, layer)
+			kit.corners[index] = newInstance("UICorner", { CornerRadius = UDim.new(0, spec.radius) }, layer)
 			kit.strokes[index] = newInstance("UIStroke", {
 				Thickness = spec.thickness, Transparency = spec.transparency, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 			}, layer)
@@ -6228,6 +6673,10 @@ function EspObject:glowRect(key, x, y, w, h, color, size, power)
 	for index, stroke in ipairs(kit.strokes) do
 		stroke.Color = color
 		stroke.Thickness, stroke.Transparency = glowLayerStyle(GLOW_LAYERS[index], size, power)
+		if round ~= nil then
+			kit.corners[index].CornerRadius = UDim.new(0, round > 0 and round + GLOW_LAYERS[index].radius or 0)
+			stroke.LineJoinMode = round > 0 and Enum.LineJoinMode.Round or Enum.LineJoinMode.Miter
+		end
 	end
 end
 
@@ -6525,6 +6974,42 @@ function EspObject:drawCorners(position, size, color)
 	end
 end
 
+-- Plain box built from filled strips: Drawing outline squares render with rounded joins on many executors, strips stay sharp.
+function EspObject:drawSharpBox(position, size, thick, outlineColor, color, haloColor, haloAlpha)
+	local rects = self.edgeRects
+	if not rects then
+		rects = {}
+		for index = 1, 12 do
+			local layer = index <= 4 and 2 or (index <= 8 and 3 or 1)
+			local rect = draw("Square", { Filled = true, Transparency = 1, Visible = false, ZIndex = layer })
+			rects[index] = rect
+			self.barObjects[#self.barObjects + 1] = rect
+		end
+		self.edgeRects = rects
+	end
+	local function ring(first, x, y, w, h, t, tint, alpha)
+		if not tint then
+			for index = first, first + 3 do rects[index].Visible = false end
+			return
+		end
+		t = math.max(math.min(t, math.floor(math.min(w, h) / 2)), 1)
+		local parts = { { x, y, w, t }, { x, y + h - t, w, t }, { x, y + t, t, h - 2 * t }, { x + w - t, y + t, t, h - 2 * t } }
+		for index = 1, 4 do
+			local rect, part = rects[first + index - 1], parts[index]
+			rect.Position, rect.Size, rect.Color, rect.Transparency, rect.Visible = Vector2.new(part[1], part[2]), Vector2.new(part[3], part[4]), tint, alpha or 1, true
+		end
+	end
+	ring(1, position.X - 1, position.Y - 1, size.X + 2, size.Y + 2, thick + 2, outlineColor)
+	ring(5, position.X, position.Y, size.X, size.Y, thick, color)
+	ring(9, position.X - 3, position.Y - 3, size.X + 6, size.Y + 6, 6, haloColor, haloAlpha)
+end
+
+function EspObject:hideSharpBox()
+	if self.edgeRects then
+		for _, rect in ipairs(self.edgeRects) do rect.Visible = false end
+	end
+end
+
 function EspObject:drawGradientBox(position, size, top, bottom)
 	local x, y, w, h = position.X, position.Y, size.X, size.Y
 	local upper, lower = top:Lerp(bottom, 0.25), top:Lerp(bottom, 0.75)
@@ -6689,7 +7174,19 @@ local function darken(color, factor)
 	return Color3.new(color.R * factor, color.G * factor, color.B * factor)
 end
 
-function EspObject:drawGradBar(id, back, bar, thick, segmentCount, colorAt, glowColor, glowSize, glowPower)
+local function guiProxy(holder)
+	return setmetatable({}, {
+		__index = function(_, key)
+			if key == "Remove" then return function() pcall(function() holder:Destroy() end) end end
+			return nil
+		end,
+		__newindex = function(_, key, value)
+			if key == "Visible" then holder.Visible = value end
+		end,
+	})
+end
+
+function EspObject:drawGradBar(id, back, bar, thick, segmentCount, colorAt, glowColor, glowSize, glowPower, round)
 	local kit = self.gradBars[id]
 	if not kit then
 		kit = {
@@ -6703,6 +7200,7 @@ function EspObject:drawGradBar(id, back, bar, thick, segmentCount, colorAt, glow
 	end
 	local function clear()
 		kit.frame.Visible, kit.back.Visible = false, false
+		if kit.gui then kit.gui.holder.Visible = false end
 		self:glowHide("bar" .. id)
 		for _, segment in ipairs(kit.segs) do segment.Visible = false end
 	end
@@ -6733,6 +7231,57 @@ function EspObject:drawGradBar(id, back, bar, thick, segmentCount, colorAt, glow
 		kit.frame.Position, kit.frame.Size = Vector2.new(lead - 1, cross - 1), Vector2.new(length + 2, thick + 2)
 		kit.back.Position, kit.back.Size = Vector2.new(lead, cross), Vector2.new(length, thick)
 	end
+	round = math.clamp(math.floor(round or 0), 0, 12)
+	if round > 0 then
+		kit.frame.Visible, kit.back.Visible = false, false
+		for _, segment in ipairs(kit.segs) do segment.Visible = false end
+		local gui = kit.gui
+		if not gui then
+			local holder = newInstance("Frame", { Name = randomName(), BackgroundColor3 = Color3.new(), BackgroundTransparency = 0.1, BorderSizePixel = 0, Visible = false }, uiRoot)
+			maid:give(holder)
+			local holderCorner = newInstance("UICorner", {}, holder)
+			local track = newInstance("Frame", { Name = randomName(), BackgroundColor3 = Color3.fromRGB(24, 24, 30), BackgroundTransparency = 0.1, BorderSizePixel = 0, Position = UDim2.fromOffset(1, 1), ZIndex = 2 }, holder)
+			local trackCorner = newInstance("UICorner", {}, track)
+			local clip = newInstance("Frame", { Name = randomName(), BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true, ZIndex = 3 }, track)
+			local clipCorner = newInstance("UICorner", {}, clip)
+			local fill = newInstance("Frame", { Name = randomName(), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 3 }, clip)
+			local gradient = newInstance("UIGradient", {}, fill)
+			gui = { holder = holder, holderCorner = holderCorner, track = track, trackCorner = trackCorner, clip = clip, clipCorner = clipCorner, fill = fill, gradient = gradient }
+			kit.gui = gui
+			self.barObjects[#self.barObjects + 1] = guiProxy(holder)
+		end
+		local width, height = vertical and thick or length, vertical and length or thick
+		local gx = vertical and (cross - 1) or (lead - 1)
+		local gy = vertical and (lead - length - 1) or (cross - 1)
+		gui.holder.Position, gui.holder.Size = UDim2.fromOffset(gx, gy), UDim2.fromOffset(width + 2, height + 2)
+		gui.track.Size = UDim2.fromOffset(width, height)
+		gui.holderCorner.CornerRadius, gui.trackCorner.CornerRadius, gui.clipCorner.CornerRadius = UDim.new(0, round + 1), UDim.new(0, round), UDim.new(0, round)
+		local filled = math.floor((vertical and height or width) * ratio + 0.5)
+		if vertical then
+			gui.clip.Position, gui.clip.Size = UDim2.fromOffset(0, height - filled), UDim2.fromOffset(width, filled)
+			gui.fill.Position, gui.fill.Size = UDim2.fromOffset(0, -(height - filled)), UDim2.fromOffset(width, height)
+			gui.gradient.Rotation = -90
+		else
+			gui.clip.Position, gui.clip.Size = UDim2.fromOffset(0, 0), UDim2.fromOffset(filled, height)
+			gui.fill.Position, gui.fill.Size = UDim2.fromOffset(0, 0), UDim2.fromOffset(width, height)
+			gui.gradient.Rotation = 0
+		end
+		local keys = {}
+		for step = 0, 8 do
+			local t = step / 8
+			keys[#keys + 1] = ColorSequenceKeypoint.new(t, colorAt(math.clamp(t, 0.001, 0.999), ratio))
+		end
+		gui.gradient.Color = ColorSequence.new(keys)
+		gui.clip.Visible = filled > 0
+		gui.holder.Visible = true
+		if glowColor then
+			self:glowRect("bar" .. id, gx, gy, width + 2, height + 2, glowColor, glowSize, glowPower)
+		else
+			self:glowHide("bar" .. id)
+		end
+		return { vertical = vertical, lead = lead, cross = cross, length = length, thick = thick, ratio = ratio }
+	end
+	if kit.gui then kit.gui.holder.Visible = false end
 	kit.frame.Visible, kit.back.Visible = true, true
 	if glowColor then
 		self:glowRect("bar" .. id, kit.frame.Position.X, kit.frame.Position.Y, kit.frame.Size.X, kit.frame.Size.Y, glowColor, glowSize, glowPower)
@@ -6776,13 +7325,13 @@ function EspObject:drawBars(colors, position, width)
 	local smooth = colors.healthGradient ~= false
 	local info = self:drawGradBar("health", self.healthBack, self.healthBar, colors.hpWidth or 2, HP_SEGMENTS, function(t, ratio)
 		return smooth and gradientAt(low, mid, high, t) or low:Lerp(high, ratio)
-	end, colors.glowHealth and colors.glowHealthColor or nil, colors.glowHealthSize, colors.glowHealthPower)
+	end, colors.glowHealth and colors.glowHealthColor or nil, colors.glowHealthSize, colors.glowHealthPower, colors.hpRound)
 	local function tinted(base)
 		return function(t) return darken(base, 0.5 + 0.5 * t) end
 	end
-	self:drawGradBar("armor", self.armorBack, self.armorBar, colors.armorWidth or 2, 10, tinted(colors.armor), colors.glowArmor and colors.glowArmorColor or nil, colors.glowArmorSize, colors.glowArmorPower)
-	self:drawGradBar("ammo", self.ammoBack, self.ammoBar, colors.ammoWidth or 2, 10, tinted(colors.ammo), colors.glowAmmo and colors.glowAmmoColor or nil, colors.glowAmmoSize, colors.glowAmmoPower)
-	self:drawGradBar("ready", self.readyBack, self.readyBar, colors.readyWidth or 2, 10, tinted(colors.ready), colors.glowReady and colors.glowReadyColor or nil, colors.glowReadySize, colors.glowReadyPower)
+	self:drawGradBar("armor", self.armorBack, self.armorBar, colors.armorWidth or 2, 10, tinted(colors.armor), colors.glowArmor and colors.glowArmorColor or nil, colors.glowArmorSize, colors.glowArmorPower, colors.armorRound)
+	self:drawGradBar("ammo", self.ammoBack, self.ammoBar, colors.ammoWidth or 2, 10, tinted(colors.ammo), colors.glowAmmo and colors.glowAmmoColor or nil, colors.glowAmmoSize, colors.glowAmmoPower, colors.ammoRound)
+	self:drawGradBar("ready", self.readyBack, self.readyBar, colors.readyWidth or 2, 10, tinted(colors.ready), colors.glowReady and colors.glowReadyColor or nil, colors.glowReadySize, colors.glowReadyPower, colors.readyRound)
 
 	local text = self.healthText
 	if text.Visible and info then
@@ -6806,7 +7355,7 @@ function EspObject:drawBars(colors, position, width)
 	end
 end
 
-function EspObject:drawReferenceBox(x, y, w, h, colors, boxColor, thickness)
+function EspObject:drawReferenceBox(x, y, w, h, colors, boxColor, thickness, round, fillSpec)
 	local kit = self.refBox
 	if not kit then
 		local holder = newInstance("Frame", { Name = randomName(), BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false }, uiRoot)
@@ -6826,7 +7375,13 @@ function EspObject:drawReferenceBox(x, y, w, h, colors, boxColor, thickness)
 		shadowFrame.Position = UDim2.fromOffset(1, 1)
 		local boxFrame, boxStroke = framed(2, Color3.new(1, 1, 1))
 		local gradient = newInstance("UIGradient", { Enabled = false }, boxStroke)
-		kit = { holder = holder, shadowFrame = shadowFrame, shadowStroke = shadowStroke, boxStroke = boxStroke, gradient = gradient }
+		local shadowCorner = newInstance("UICorner", { CornerRadius = UDim.new(0, 0) }, shadowFrame)
+		local boxCorner = newInstance("UICorner", { CornerRadius = UDim.new(0, 0) }, boxFrame)
+		local fillFrame = newInstance("Frame", { Name = randomName(), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), ZIndex = 1, Visible = false }, holder)
+		local fillCorner = newInstance("UICorner", { CornerRadius = UDim.new(0, 0) }, fillFrame)
+		local fillGradient = newInstance("UIGradient", { Enabled = false }, fillFrame)
+		kit = { holder = holder, shadowFrame = shadowFrame, shadowStroke = shadowStroke, boxStroke = boxStroke, gradient = gradient,
+			shadowCorner = shadowCorner, boxCorner = boxCorner, fillFrame = fillFrame, fillCorner = fillCorner, fillGradient = fillGradient }
 		self.refBox = kit
 		self.barObjects[#self.barObjects + 1] = setmetatable({}, {
 			__index = function(_, key)
@@ -6842,6 +7397,30 @@ function EspObject:drawReferenceBox(x, y, w, h, colors, boxColor, thickness)
 	kit.holder.Position, kit.holder.Size, kit.holder.Visible = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h), true
 	kit.shadowFrame.Visible = colors.outline ~= false
 	kit.boxStroke.Thickness, kit.shadowStroke.Thickness = thickness, thickness
+	round = math.clamp(math.floor(round or 0), 0, 40)
+	kit.boxCorner.CornerRadius, kit.shadowCorner.CornerRadius, kit.fillCorner.CornerRadius = UDim.new(0, round), UDim.new(0, round), UDim.new(0, round)
+	kit.boxStroke.LineJoinMode = round > 0 and Enum.LineJoinMode.Round or Enum.LineJoinMode.Miter
+	kit.shadowStroke.LineJoinMode = kit.boxStroke.LineJoinMode
+	if fillSpec then
+		local alpha = math.clamp((fillSpec.opacity or 26) / 100, 0.02, 0.9)
+		kit.fillFrame.Visible = true
+		kit.fillFrame.BackgroundColor3 = fillSpec.first
+		kit.fillFrame.BackgroundTransparency = 1 - alpha
+		if fillSpec.gradient then
+			local mix = math.clamp((fillSpec.mix or 50) / 100, 0.05, 0.95)
+			kit.fillGradient.Rotation = fillSpec.direction == "Horizontal" and 0 or (fillSpec.direction == "Diagonal" and 45 or 90)
+			kit.fillGradient.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, fillSpec.first),
+				ColorSequenceKeypoint.new(mix, fillSpec.first:Lerp(fillSpec.second, 0.5)),
+				ColorSequenceKeypoint.new(1, fillSpec.second),
+			})
+			kit.fillGradient.Enabled = true
+		else
+			kit.fillGradient.Enabled = false
+		end
+	else
+		kit.fillFrame.Visible = false
+	end
 	if colors.boxGradient then
 		local direction = colors.boxGradDir or "Vertical"
 		local mix = math.clamp((colors.gradMix or 50) / 100, 0.05, 0.95)
@@ -6860,32 +7439,70 @@ function EspObject:drawReferenceBox(x, y, w, h, colors, boxColor, thickness)
 	end
 end
 
+-- Габарит детали. Специально НЕ умножаем на SpecialMesh.Scale: у кастомных
+-- ригов масштаб меша кривой (тонкий и высокий), и бокс из-за него вытягивался
+-- и сужался. part.Size совпадает с реальным размером детали.
+local function partExtents(part)
+	return part.Size
+end
+
+-- В габарит тела не входят инструменты в руках, аксессуары и служебные
+-- невидимые части: они либо есть только у одного игрока, либо раздувают бокс.
+local function silhouettePart(part)
+	if not part:IsA("BasePart") then return false end
+	local name = part.Name:lower()
+	if name == "humanoidrootpart" or name:find("hitbox", 1, true) then return false end
+	if part:FindFirstAncestorOfClass("Tool") or part:FindFirstAncestorOfClass("Accessory") then return false end
+	return true
+end
+
 function EspObject:tightBox(character)
 	local now = os.clock()
 	if self.tightCharacter ~= character or now - (self.tightAt or 0) > 1.5 then
 		self.tightCharacter, self.tightAt = character, now
 		local list = {}
 		for _, part in ipairs(character:GetDescendants()) do
-			if part:IsA("BasePart") then
-				local name = part.Name:lower()
-				if name:find("head", 1, true) or name:find("torso", 1, true) or name:find("arm", 1, true)
-					or name:find("leg", 1, true) or name:find("foot", 1, true) or name:find("hand", 1, true) then
-					list[#list + 1] = part
-				end
-			end
+			if silhouettePart(part) then list[#list + 1] = part end
 		end
 		self.tightParts = list
 	end
 	local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
 	local found = false
+	local cameraFrame = currentCamera.CFrame
+	-- Угол за камерой проецируется в бесконечность: из-за этого бокс раздувался,
+	-- когда цель подходила вплотную. Такие углы просто пропускаем.
+	local function cornerPoint(world)
+		local relative = cameraFrame:PointToObjectSpace(world)
+		if relative.Z > -0.1 then return nil end
+		return currentCamera:WorldToViewportPoint(world)
+	end
 	for _, part in ipairs(self.tightParts) do
 		if part.Parent then
-			local cf, extent = part.CFrame, part.Size / 2
+			local cf, extent = part.CFrame, partExtents(part) / 2
 			for _, sx in ipairs({ -1, 1 }) do
 				for _, sy in ipairs({ -1, 1 }) do
 					for _, sz in ipairs({ -1, 1 }) do
-						local point = currentCamera:WorldToViewportPoint(cf * Vector3.new(extent.X * sx, extent.Y * sy, extent.Z * sz))
-						if point.Z > 0 then
+						local point = cornerPoint(cf * Vector3.new(extent.X * sx, extent.Y * sy, extent.Z * sz))
+						if point then
+							found = true
+							minX, maxX = math.min(minX, point.X), math.max(maxX, point.X)
+							minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
+						end
+					end
+				end
+			end
+		end
+	end
+	-- Риг без распознаваемых частей: падаем на габарит всей модели.
+	if not found then
+		local ok, cf, size = pcall(function() return character:GetBoundingBox() end)
+		if ok and typeof(cf) == "CFrame" and typeof(size) == "Vector3" then
+			local cf2, extent = cf, size / 2
+			for _, sx in ipairs({ -1, 1 }) do
+				for _, sy in ipairs({ -1, 1 }) do
+					for _, sz in ipairs({ -1, 1 }) do
+						local point = cornerPoint(cf2 * Vector3.new(extent.X * sx, extent.Y * sy, extent.Z * sz))
+						if point then
 							found = true
 							minX, maxX = math.min(minX, point.X), math.max(maxX, point.X)
 							minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
@@ -7072,8 +7689,19 @@ function EspObject:applyLayout(position, size, colors)
 end
 
 function EspObject:placeWeaponIcon(image, colors, position, size, root)
+	self.billboard.Enabled = false
+	local label = self.iconLabel
+	if not label then
+		label = newInstance("ImageLabel", {
+			Name = randomName(), BackgroundTransparency = 1, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Fit,
+			AnchorPoint = Vector2.new(0.5, 0.5), ZIndex = 5, Visible = false,
+		}, uiRoot)
+		maid:give(label)
+		self.iconLabel = label
+		self.barObjects[#self.barObjects + 1] = guiProxy(label)
+	end
 	if image == "" then
-		self.billboard.Enabled = false
+		label.Visible = false
 		return
 	end
 	local iconW = math.clamp(colors.iconWidth or 46, 8, 300)
@@ -7094,17 +7722,12 @@ function EspObject:placeWeaponIcon(image, colors, position, size, root)
 			center = Vector2.new(position.X + size.X / 2, position.Y + size.Y + 4 + iconH / 2)
 		end
 	end
-	local cam = currentCamera
-	local anchor = cam:WorldToViewportPoint(root.Position)
-	local depth = math.max(anchor.Z, 1)
-	local perPixel = depth * 2 * math.tan(math.rad(cam.FieldOfView) / 2) / math.max(cam.ViewportSize.Y, 1)
-	if self.billboard.Parent ~= cam then self.billboard.Parent = cam end
-	self.billboard.Enabled = true
-	self.billboard.Adornee = root
-	self.icon.Image = image
-	self.icon.ImageColor3 = colors.weaponIcon
-	self.billboard.Size = UDim2.fromOffset(iconW, iconH)
-	self.billboard.StudsOffsetWorldSpace = cam.CFrame.RightVector * ((center.X - anchor.X) * perPixel) + cam.CFrame.UpVector * ((anchor.Y - center.Y) * perPixel)
+	-- Screen-space label: the size is exactly the Width and Height set in the menu at any distance.
+	label.Image = image
+	label.ImageColor3 = colors.weaponIcon
+	label.Size = UDim2.fromOffset(iconW, iconH)
+	label.Position = UDim2.fromOffset(math.floor(center.X + 0.5), math.floor(center.Y + 0.5))
+	label.Visible = true
 end
 
 function EspObject:updateRendering(character, hide)
@@ -7353,6 +7976,23 @@ function EspObject:update(delta)
 		position, size = Vector2.new(rootPoint.X - width / 2, position.Y), Vector2.new(width, height)
 	end
 
+	-- Минимальный экранный размер: на дистанции и на мелких моделях бокс иначе
+	-- превращается в точку, хотя цель прекрасно видна. Увеличиваем ОДНИМ
+	-- множителем, чтобы форма бокса не искажалась (не становился узким).
+	if colors.fixedBox ~= true then
+		local minWidth = math.clamp(tonumber(colors.minWidth) or 18, 0, 200)
+		local minHeight = math.clamp(tonumber(colors.minHeight) or 36, 0, 400)
+		local grow = math.max(minWidth / math.max(width, 0.001), minHeight / math.max(height, 0.001))
+		if grow > 1 then
+			local midX, midY = position.X + width / 2, position.Y + height / 2
+			width, height = width * grow, height * grow
+			position = Vector2.new(midX - width / 2, midY - height / 2)
+			size = Vector2.new(width, height)
+			top = Vector3.new(rootPoint.X, position.Y, top.Z)
+			bottom = Vector3.new(rootPoint.X, position.Y + height, bottom.Z)
+		end
+	end
+
 	local showBox = item(team, "Main/Bounding Box")
 	local style = config.boxStyle
 	local pixel = showBox and (style == "Pixel" or style == "Pixel Filled")
@@ -7360,6 +8000,9 @@ function EspObject:update(delta)
 	local reference = showBox and (style == "Reference" or style == "Reference Filled")
 	local corners = showBox and style == "Corners"
 	local plain = showBox and not corners and not pixel and not classic and not reference
+	local round = math.clamp(math.floor(colors.boxRound or 0), 0, 20)
+	local rounded = round > 0 and (plain or reference)
+	if rounded and plain then plain, reference = false, true end
 	local gradient = plain and colors.boxGradient
 	local cell = math.clamp(math.floor(colors.boxThick or 2), 1, 4)
 
@@ -7371,18 +8014,13 @@ function EspObject:update(delta)
 		position, size = Vector2.new(snapX, snapY), Vector2.new(width, height)
 	end
 
-	self.boxOutline.Visible = plain and colors.outline
-	self.box.Visible = plain and not gradient
-	if plain then
-		self.box.Thickness, self.boxOutline.Thickness = cell, cell + 2
-		self.boxOutline.Position, self.boxOutline.Size, self.boxOutline.Color = position, size, colors.outlineColor
-		self.box.Position, self.box.Size, self.box.Color = position, size, boxColor
-	end
-	self.boxGlow.Visible = plain
+	self.boxOutline.Visible, self.box.Visible, self.boxGlow.Visible = false, false, false
 	if plain then
 		local targeted = Rage.target ~= nil and Rage.target.entity == entity
-		self.boxGlow.Position, self.boxGlow.Size, self.boxGlow.Color = position, size, boxColor
-		self.boxGlow.Transparency = targeted and (0.2 + 0.1 * math.sin(os.clock() * 8)) or 0.1
+		self:drawSharpBox(position, size, cell, colors.outline and colors.outlineColor or nil, (not gradient) and boxColor or nil,
+			boxColor, targeted and (0.2 + 0.1 * math.sin(os.clock() * 8)) or 0.1)
+	else
+		self:hideSharpBox()
 	end
 	for _, line in ipairs(self.gradLines) do line.Visible = false end
 	if gradient then self:drawGradientBox(position, size, boxColor, colors.box2) end
@@ -7394,15 +8032,18 @@ function EspObject:update(delta)
 		self:hidePixel()
 	end
 
+	local filled = showBox and (style == "Filled" or style == "Pixel Filled" or style == "Classic Filled" or style == "Reference Filled")
 	if reference then
-		local okRef, errRef = pcall(self.drawReferenceBox, self, position.X, position.Y, width, height, colors, boxColor, cell)
+		local fillSpec = rounded and filled and { first = fillColor, second = colors.fill2, gradient = colors.fillGradient, direction = colors.boxGradDir, mix = colors.gradMix, opacity = colors.fillAlpha } or nil
+		local okRef, errRef = pcall(self.drawReferenceBox, self, position.X, position.Y, width, height, colors, boxColor, cell, rounded and round or 0, fillSpec)
 		if not okRef then report(errRef) end
 	elseif self.refBox then
 		self.refBox.holder.Visible = false
 	end
 
-	local filled = showBox and (style == "Filled" or style == "Pixel Filled" or style == "Classic Filled" or style == "Reference Filled")
-	if filled then
+	if filled and rounded then
+		pcall(self.drawFill, self, 0, 0, 0, 0, fillColor, colors.fill2, false)
+	elseif filled then
 		local inset = (pixel or classic) and cell or 0
 		local ok, err = pcall(self.drawFill, self, position.X + inset, position.Y + inset, width - 2 * inset, height - 2 * inset, fillColor, colors.fill2, colors.fillGradient, colors.boxGradDir, colors.gradMix, colors.fillAlpha)
 		if not ok then report(err) end
@@ -7416,7 +8057,7 @@ function EspObject:update(delta)
 	end
 
 	if showBox and colors.glowBox then
-		self:glowRect("box", position.X, position.Y, width, height, colors.glowBoxColor, colors.glowBoxSize, colors.glowBoxPower)
+		self:glowRect("box", position.X, position.Y, width, height, colors.glowBoxColor, colors.glowBoxSize, colors.glowBoxPower, rounded and round or 0)
 	else
 		self:glowHide("box")
 	end
@@ -8882,14 +9523,27 @@ local function paintModel(model, visible, walls)
 end
 
 -- Layered glow identical to the live ESP: stacked rounded strokes around a rectangle.
-function Preview.glowRect(store, key, parent, zIndex, x, y, w, h, color, size, power)
+-- Self-contained copy of the live layer table so the preview never depends on outer-scope locals.
+Preview.glowLayers = {
+	{ thickness = 2, transparency = 0.5, radius = 2 },
+	{ thickness = 4, transparency = 0.72, radius = 4 },
+	{ thickness = 7, transparency = 0.85, radius = 7 },
+	{ thickness = 11, transparency = 0.93, radius = 11 },
+}
+function Preview.glowStyle(spec, size, power)
+	local scale = 0.35 + (size or 50) / 50 * 0.65
+	local boost = (power or 50) / 50
+	return math.max(1, spec.thickness * scale), math.clamp(1 - (1 - spec.transparency) * boost, 0, 0.98)
+end
+
+function Preview.glowRect(store, key, parent, zIndex, x, y, w, h, color, size, power, round)
 	local kit = store[key]
 	if not kit then
 		local holder = newInstance("Frame", { Name = randomName(), BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = zIndex }, parent)
-		kit = { holder = holder, strokes = {} }
-		for index, spec in ipairs(GLOW_LAYERS) do
+		kit = { holder = holder, strokes = {}, corners = {} }
+		for index, spec in ipairs(Preview.glowLayers) do
 			local layer = newInstance("Frame", { Name = randomName(), BackgroundTransparency = 1, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), ZIndex = zIndex }, holder)
-			newInstance("UICorner", { CornerRadius = UDim.new(0, spec.radius) }, layer)
+			kit.corners[index] = newInstance("UICorner", { CornerRadius = UDim.new(0, spec.radius) }, layer)
 			kit.strokes[index] = newInstance("UIStroke", { Thickness = spec.thickness, Transparency = spec.transparency, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, layer)
 		end
 		store[key] = kit
@@ -8897,7 +9551,11 @@ function Preview.glowRect(store, key, parent, zIndex, x, y, w, h, color, size, p
 	kit.holder.Position, kit.holder.Size, kit.holder.Visible = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h), true
 	for index, stroke in ipairs(kit.strokes) do
 		stroke.Color = color
-		stroke.Thickness, stroke.Transparency = glowLayerStyle(GLOW_LAYERS[index], size, power)
+		stroke.Thickness, stroke.Transparency = Preview.glowStyle(Preview.glowLayers[index], size, power)
+		if round ~= nil then
+			kit.corners[index].CornerRadius = UDim.new(0, round > 0 and round + Preview.glowLayers[index].radius or 0)
+			stroke.LineJoinMode = round > 0 and Enum.LineJoinMode.Round or Enum.LineJoinMode.Miter
+		end
 	end
 end
 
@@ -9011,19 +9669,15 @@ function Preview.update()
 		local bx0, by0, bx1, by1 = math.huge, math.huge, -math.huge, -math.huge
 		if cfg.tightBox ~= false then
 			for _, part in ipairs(model:GetDescendants()) do
-				if part:IsA("BasePart") then
-					local lowered = part.Name:lower()
-					if lowered:find("head", 1, true) or lowered:find("torso", 1, true) or lowered:find("arm", 1, true)
-						or lowered:find("leg", 1, true) or lowered:find("foot", 1, true) or lowered:find("hand", 1, true) then
-						local cf, extent = part.CFrame, part.Size / 2
-						for _, sx in ipairs({ -1, 1 }) do
-							for _, sy in ipairs({ -1, 1 }) do
-								for _, sz in ipairs({ -1, 1 }) do
-									local point = project(camera, size, cf * Vector3.new(extent.X * sx, extent.Y * sy, extent.Z * sz))
-									if point then
-										bx0, bx1 = math.min(bx0, point.X), math.max(bx1, point.X)
-										by0, by1 = math.min(by0, point.Y), math.max(by1, point.Y)
-									end
+				if silhouettePart(part) then
+					local cf, extent = part.CFrame, partExtents(part) / 2
+					for _, sx in ipairs({ -1, 1 }) do
+						for _, sy in ipairs({ -1, 1 }) do
+							for _, sz in ipairs({ -1, 1 }) do
+								local point = project(camera, size, cf * Vector3.new(extent.X * sx, extent.Y * sy, extent.Z * sz))
+								if point then
+									bx0, bx1 = math.min(bx0, point.X), math.max(bx1, point.X)
+									by0, by1 = math.min(by0, point.Y), math.max(by1, point.Y)
 								end
 							end
 						end
@@ -9057,6 +9711,16 @@ function Preview.update()
 			boxSize = Vector2.new(boxSize.X * widthScale, boxSize.Y)
 			position = Vector2.new(centerX - boxSize.X / 2, position.Y)
 		end
+		if cfg.fixedBox ~= true then
+			local minWidth = math.clamp(tonumber(cfg.minWidth) or 18, 0, 200)
+			local minHeight = math.clamp(tonumber(cfg.minHeight) or 36, 0, 400)
+			local grow = math.max(minWidth / math.max(boxSize.X, 0.001), minHeight / math.max(boxSize.Y, 0.001))
+			if grow > 1 then
+				local midX, midY = position.X + boxSize.X / 2, position.Y + boxSize.Y / 2
+				boxSize = Vector2.new(boxSize.X * grow, boxSize.Y * grow)
+				position = Vector2.new(midX - boxSize.X / 2, midY - boxSize.Y / 2)
+			end
+		end
 	end
 	local center = position.X + boxSize.X / 2
 
@@ -9070,7 +9734,8 @@ function Preview.update()
 	local pixelBox = showBox and (style == "Pixel" or style == "Pixel Filled")
 	local classicBox = showBox and (style == "Classic" or style == "Classic Filled")
 	local referenceBox = showBox and (style == "Reference" or style == "Reference Filled")
-	local corners = showBox and (style == "Corners" or referenceBox)
+	local boxRadius = (showBox and not pixelBox and not classicBox and style ~= "Corners") and math.clamp(math.floor(colors.boxRound or 0), 0, 20) or 0
+	local corners = showBox and (style == "Corners" or (referenceBox and boxRadius == 0))
 	local plain = showBox and style ~= "Corners"
 	local filled = showBox and (style == "Filled" or style == "Pixel Filled" or style == "Classic Filled" or style == "Reference Filled")
 	local cell = math.clamp(math.floor(colors.boxThick or 2), 1, 4)
@@ -9086,8 +9751,13 @@ function Preview.update()
 	ui.outlineStroke.Thickness = cell + 2
 	ui.boxStroke.Color = boxColor
 	ui.boxStroke.Thickness = pixelBox and cell + 1 or cell
-	ui.boxStroke.Transparency = referenceBox and 0.65 or 0
+	ui.boxStroke.Transparency = (referenceBox and boxRadius == 0) and 0.65 or 0
 	ui.boxStroke.Enabled = plain
+	ui.boxCorner = ui.boxCorner or newInstance("UICorner", {}, ui.box)
+	ui.outlineCorner = ui.outlineCorner or newInstance("UICorner", {}, ui.boxOutline)
+	ui.boxCorner.CornerRadius, ui.outlineCorner.CornerRadius = UDim.new(0, boxRadius), UDim.new(0, boxRadius)
+	ui.boxStroke.LineJoinMode = boxRadius > 0 and Enum.LineJoinMode.Round or Enum.LineJoinMode.Miter
+	ui.outlineStroke.LineJoinMode = ui.boxStroke.LineJoinMode
 	local fillAlpha = 1 - math.clamp((colors.fillAlpha or 26) / 100, 0.05, 0.8)
 	ui.box.BackgroundColor3 = filled and fillColor or boxColor
 	ui.box.BackgroundTransparency = filled and fillAlpha or 1
@@ -9107,16 +9777,13 @@ function Preview.update()
 		end
 	end
 	ui.box.Visible = plain or filled
-	local boxGlow = ui.boxGlow
-	if not boxGlow then
-		boxGlow = frame(ui.layer, { BackgroundTransparency = 1, ZIndex = ui.box.ZIndex - 1 })
-		newInstance("UIStroke", { Thickness = 5, Transparency = 0.6 }, boxGlow)
-		ui.boxGlow = boxGlow
-	end
-	boxGlow.Visible = showBox and colors.glowBox == true
-	if boxGlow.Visible then
-		boxGlow.Position, boxGlow.Size = UDim2.fromOffset(position.X, position.Y), UDim2.fromOffset(boxSize.X, boxSize.Y)
-		boxGlow:FindFirstChildOfClass("UIStroke").Color = colors.glowBoxColor or boxColor
+	ui.glowKits = ui.glowKits or {}
+	if showBox and colors.glowBox == true then
+		local okGlow, errGlow = pcall(Preview.glowRect, ui.glowKits, "box", ui.layer, ui.box.ZIndex - 1, position.X, position.Y, boxSize.X, boxSize.Y,
+			colors.glowBoxColor or boxColor, colors.glowBoxSize, colors.glowBoxPower, boxRadius)
+		if not okGlow then Neverlose.previewGlowError = tostring(errGlow) end
+	else
+		Preview.glowHide(ui.glowKits, "box")
 	end
 
 	local x, y, w, h = position.X, position.Y, boxSize.X, boxSize.Y
@@ -9261,10 +9928,14 @@ function Preview.update()
 		return healthMid:Lerp(colors.health, (t - 0.5) * 2)
 	end
 
-	local function setBar(entry, id, ratio, color, topColor, lowColor, widthKey, glowKey)
+	local function setBar(entry, id, ratio, color, topColor, lowColor, widthKey, glowKey, roundKey)
 		local state = animate(id)
 		entry.back.Visible, entry.hit.Visible = state ~= nil, state ~= nil
-		if not state then return end
+		if not state then
+			ui.glowKits = ui.glowKits or {}
+			Preview.glowHide(ui.glowKits, "bar" .. id)
+			return
+		end
 		local held = drag ~= nil and drag.id == id
 		Preview.centers[id] = Vector2.new(state.x + state.w / 2, state.y + state.h / 2)
 		local thick = (colors[widthKey] or 2) + 2
@@ -9274,12 +9945,20 @@ function Preview.update()
 			entry.back.Position, entry.back.Size = UDim2.fromOffset(state.x, state.y + state.h / 2 - thick / 2), UDim2.fromOffset(state.w, thick)
 		end
 		entry.back.BackgroundTransparency = held and 0.35 or 0
-		local glowStroke = entry.glow
+		local radius = math.clamp(math.floor(colors[roundKey or "roundNone"] or 0), 0, 12)
+		entry.backCorner = entry.backCorner or newInstance("UICorner", {}, entry.back)
+		entry.fillCorner = entry.fillCorner or newInstance("UICorner", {}, entry.fill)
+		entry.backCorner.CornerRadius = UDim.new(0, radius > 0 and radius + 1 or 0)
+		entry.fillCorner.CornerRadius = UDim.new(0, radius)
+		ui.glowKits = ui.glowKits or {}
 		if colors[glowKey] then
-			if not glowStroke then glowStroke = newInstance("UIStroke", { Thickness = 3, Transparency = 0.55 }, entry.back); entry.glow = glowStroke end
-			glowStroke.Enabled, glowStroke.Color = true, colors[glowKey .. "Color"] or color
-		elseif glowStroke then
-			glowStroke.Enabled = false
+			local gx, gy = entry.back.Position.X.Offset, entry.back.Position.Y.Offset
+			local gw, gh = entry.back.Size.X.Offset, entry.back.Size.Y.Offset
+			local okGlow, errGlow = pcall(Preview.glowRect, ui.glowKits, "bar" .. id, ui.layer, entry.back.ZIndex - 1, gx - 1, gy - 1, gw + 2, gh + 2,
+				colors[glowKey .. "Color"] or color, colors[glowKey .. "Size"], colors[glowKey .. "Power"])
+			if not okGlow then Neverlose.previewGlowError = tostring(errGlow) end
+		else
+			Preview.glowHide(ui.glowKits, "bar" .. id)
 		end
 		entry.hit.Position, entry.hit.Size = UDim2.fromOffset(state.x - 3, state.y - 3), UDim2.fromOffset(state.w + 6, state.h + 6)
 		local vertical = state.h >= state.w
@@ -9299,10 +9978,10 @@ function Preview.update()
 			entry.fill.AnchorPoint, entry.fill.Position, entry.fill.Size = Vector2.new(0, 0), UDim2.fromOffset(1, 1), UDim2.new(ratio, -2, 1, -2)
 		end
 	end
-	setBar(ui.health, "health", hp, healthAt(hp), healthAt(hp), colors.healthLow, "hpWidth", "glowHealth")
-	setBar(ui.armor, "armor", 0.55, colors.armor, nil, nil, "armorWidth", "glowArmor")
-	setBar(ui.ammo, "ammo", 0.6, colors.ammo, nil, nil, "ammoWidth", "glowAmmo")
-	setBar(ui.ready, "ready", 0.85, colors.ready, nil, nil, "readyWidth", "glowReady")
+	setBar(ui.health, "health", hp, healthAt(hp), healthAt(hp), colors.healthLow, "hpWidth", "glowHealth", "hpRound")
+	setBar(ui.armor, "armor", 0.55, colors.armor, nil, nil, "armorWidth", "glowArmor", "armorRound")
+	setBar(ui.ammo, "ammo", 0.6, colors.ammo, nil, nil, "ammoWidth", "glowAmmo", "ammoRound")
+	setBar(ui.ready, "ready", 0.85, colors.ready, nil, nil, "readyWidth", "glowReady", "readyRound")
 
 	for id, label in pairs(sized) do
 		local state = animate(id)
@@ -14213,10 +14892,17 @@ end
 
 function Menu.loadLibrary()
 	local source
-	if isfile and readfile and isfile(LIBRARY_FILE) then
+	-- Always pull the current library first; a stale cached scr.lua lacks AddHitSounds and breaks the menu.
+	local fetchedOk, fetched = pcall(function() return game:HttpGet(LIBRARY_URL) end)
+	if fetchedOk and type(fetched) == "string" and #fetched >= 100000 and fetched:find("AddHitSounds", 1, true) then
+		source = fetched
+		if writefile then pcall(writefile, LIBRARY_FILE, fetched) end
+	elseif isfile and readfile and isfile(LIBRARY_FILE) then
 		source = readfile(LIBRARY_FILE)
-	else
-		source = game:HttpGet(LIBRARY_URL)
+	end
+	if type(source) == "string" and not source:find("AddHitSounds", 1, true) then
+		if delfile and isfile and isfile(LIBRARY_FILE) then pcall(delfile, LIBRARY_FILE) end
+		error("library is outdated (no AddHitSounds): cache deleted, re-execute the script")
 	end
 
 	-- A swapped or truncated library is refused before it is ever executed.
@@ -14234,6 +14920,27 @@ function Menu.loadLibrary()
 		{ 's.Volume = math.clamp(vol or 100, 0, 100) / 100', 's.Volume = math.clamp(vol or 100, 0, 500) / 100' },
 		{ 'vs:AddSlider(ev.name, 0, 100, vols[ev.key]', 'vs:AddSlider(ev.name, 0, 500, vols[ev.key]' },
 		{ 'SaveText.Text = activeConfigName or "Default"\n\t\tUpdateSavePillWidth(SaveText.Text, true)\n\t\t-- The active preset is remembered for the next run.\n\t\tWindowObj._writeLastConfig(activeConfigName or "Default")', 'SaveText.Text = activeConfigName or "Default"\n\t\tpcall(WindowObj._writeLastConfig, activeConfigName or "Default")' },
+		{ [==[Stroke(chip, "ChipOutline")]==], [==[Stroke(chip, "ChipOutline")
+				do
+					local chipScale = Instance.new("UIScale")
+					chipScale.Parent = chip
+					local chipKey = group[1] .. "/" .. item
+					chip.MouseEnter:Connect(function()
+						if state[team][chipKey] then return end
+						Tween(chip, { BackgroundColor3 = Color3.fromRGB(38, 41, 56), TextColor3 = Color3.fromRGB(205, 208, 220) }, 0.12)
+						local edge = chip:FindFirstChild("ChipOutline")
+						if edge then Tween(edge, { Transparency = 0.8 }, 0.12) end
+					end)
+					chip.MouseLeave:Connect(function()
+						Tween(chipScale, { Scale = 1 }, 0.12)
+						if state[team][chipKey] then return end
+						Tween(chip, { BackgroundColor3 = Color3.fromRGB(30, 32, 42), TextColor3 = MUTED }, 0.14)
+						local edge = chip:FindFirstChild("ChipOutline")
+						if edge then Tween(edge, { Transparency = STROKE.Transparency }, 0.14) end
+					end)
+					chip.MouseButton1Down:Connect(function() Tween(chipScale, { Scale = 0.95 }, 0.08) end)
+					chip.MouseButton1Up:Connect(function() Tween(chipScale, { Scale = 1 }, 0.2, Enum.EasingStyle.Back) end)
+				end]==] },
 		{ 'local homeParent, homePos, homeSize\n', 'local homeParent, homePos, homeSize, homeZ\n' },
 		{ 'homeParent, homePos, homeSize = preview.Parent, preview.Position, preview.Size\n', 'homeParent, homePos, homeSize = preview.Parent, preview.Position, preview.Size\n\t\t\t\t\thomeZ = preview.ZIndex\n' },
 		{ '\t\t\t\t\t\tpreview.Position, preview.Size = homePos, homeSize\n', '\t\t\t\t\t\tpreview.Position, preview.Size = homePos, homeSize\n\t\t\t\t\t\tif homeZ then pcall(ApplyZIndexLadder, preview, homeZ) end\n' },
@@ -14712,7 +15419,7 @@ function Menu.visuals(window, hk)
 
 	local FONT_LIST = { "Tahoma", "Verdana", "Pixel", "Code", "Plex", "Monospace", "System", "UI" }
 	local BOX_STYLES = { "Reference", "Reference Filled", "Classic", "Classic Filled", "Default", "Corners", "Filled", "Pixel", "Pixel Filled" }
-	local function S(label, key, min, max, suffix) return { label, "slider", key, min = min, max = max, suffix = suffix, both = true } end
+	local function S(label, key, min, max, suffix, default) return { label, "slider", key, min = min, max = max, suffix = suffix, both = true, default = default } end
 	local function D(label, key, options, global) return { label, "dropdown", key, options = options, global = global, both = true } end
 	local function T(label, key, default) return { label, "toggle", key, default = default, both = true } end
 
@@ -14726,12 +15433,13 @@ function Menu.visuals(window, hk)
 			{ "Fill Gradient", "toggle", "fillGradient" }, { "Fill Gradient Color", "color", "fill2" },
 			T("Tight Box", "tightBox", true), S("Padding", "boxPad", 0, 25, "%"),
 			T("Fixed Size", "fixedBox", false), S("Fixed Width", "fixedW", 20, 200, "px"), S("Fixed Height", "fixedH", 30, 300, "px"),
-			S("Width", "boxWidth", 50, 200, "%"), S("Thickness", "boxThick", 1, 4, "px"),
+			S("Min Width", "minWidth", 0, 200, "px", 18), S("Min Height", "minHeight", 0, 400, "px", 36),
+			S("Width", "boxWidth", 50, 200, "%"), S("Thickness", "boxThick", 1, 4, "px"), S("Roundness", "boxRound", 0, 20, "px"),
 		},
-		["Main/Health Bar"] = { { "Low Health Color", "color", "healthLow" }, { "Mid Color", "color", "healthMid" }, S("Width", "hpWidth", 1, 8, "px"), T("Gradient", "healthGradient", true) },
-		["Main/Armor Bar"] = { S("Width", "armorWidth", 1, 6, "px") },
-		["Main/Ammo Bar"] = { S("Height", "ammoWidth", 1, 6, "px") },
-		["Weapon/Readiness Bar"] = { S("Height", "readyWidth", 1, 6, "px") },
+		["Main/Health Bar"] = { { "Low Health Color", "color", "healthLow" }, { "Mid Color", "color", "healthMid" }, S("Width", "hpWidth", 1, 8, "px"), S("Roundness", "hpRound", 0, 8, "px"), T("Gradient", "healthGradient", true) },
+		["Main/Armor Bar"] = { S("Width", "armorWidth", 1, 6, "px"), S("Roundness", "armorRound", 0, 8, "px") },
+		["Main/Ammo Bar"] = { S("Height", "ammoWidth", 1, 6, "px"), S("Roundness", "ammoRound", 0, 8, "px") },
+		["Weapon/Readiness Bar"] = { S("Height", "readyWidth", 1, 6, "px"), S("Roundness", "readyRound", 0, 8, "px") },
 		["Main/Skeleton"] = { S("Thickness", "skelThick", 1, 4, "px") },
 		["Main/Snaplines"] = { D("Origin", "snapOrigin", { "Bottom", "Center", "Top" }, true), S("Thickness", "snapThick", 1, 4, "px") },
 		["Main/Head Dot"] = { S("Size", "dotSize", 50, 300, "%") },
@@ -14777,6 +15485,69 @@ function Menu.visuals(window, hk)
 		local base = frame:FindFirstChild("SVSquare")
 		local z = base and base.ZIndex or 10802
 		local state = { controls = {} }
+		local NL = {
+			accent = Color3.fromRGB(110, 130, 255), plate = Color3.fromRGB(28, 31, 44), plateHover = Color3.fromRGB(38, 42, 58),
+			track = Color3.fromRGB(45, 48, 64), text = Color3.fromRGB(226, 228, 238), muted = Color3.fromRGB(150, 154, 172),
+			chip = Color3.fromRGB(30, 32, 42), chipOn = Color3.fromRGB(44, 48, 66), chipHover = Color3.fromRGB(38, 41, 56),
+			lavender = Color3.fromRGB(150, 164, 255), bright = Color3.fromRGB(235, 236, 241),
+		}
+		local NL_FONT = Enum.Font.GothamMedium
+		pcall(function() NL_FONT = Enum.Font.BuilderSansMedium end)
+		local function ease(object, properties, duration, style)
+			pcall(function()
+				tweenService:Create(object, TweenInfo.new(duration or 0.15, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), properties):Play()
+			end)
+		end
+		local function outline(parent, transparency)
+			local stroke = Instance.new("UIStroke")
+			stroke.Color, stroke.Transparency, stroke.Thickness, stroke.ApplyStrokeMode = Color3.new(1, 1, 1), transparency or 0.92, 1, Enum.ApplyStrokeMode.Border
+			stroke.Parent = parent
+			return stroke
+		end
+		local animators = {}
+		local function paintTab(button, selected)
+			button:SetAttribute("Selected", selected)
+			ease(button, { BackgroundColor3 = selected and NL.chipOn or NL.chip, BackgroundTransparency = selected and 0 or 0.2, TextColor3 = selected and NL.bright or NL.muted }, 0.12)
+			local stroke = button:FindFirstChildOfClass("UIStroke")
+			if stroke then ease(stroke, { Color = selected and NL.lavender or Color3.new(1, 1, 1), Transparency = selected and 0.35 or 0.92 }, 0.12) end
+		end
+
+		-- Dropdown lists live in this zero-size host inside the picker, so they stay part of it for outside-click handling.
+		local overlay = Instance.new("Frame")
+		overlay.Name, overlay.LayoutOrder, overlay.Size, overlay.BackgroundTransparency, overlay.BorderSizePixel, overlay.ZIndex = "ExtraOverlay", 100, UDim2.fromOffset(0, 0), 1, 0, z
+		overlay.Parent = frame
+		local function raiseOverlay(top)
+			top = (top or frame.ZIndex + 8) + 30
+			for _, d in ipairs(overlay:GetDescendants()) do
+				if d:IsA("GuiObject") then d.ZIndex = top + (d:GetAttribute("Lv") or 0) end
+			end
+			overlay.ZIndex = top - 1
+		end
+		local openList
+		local function closeList(instant)
+			if openList then
+				local entry = openList
+				openList = nil
+				entry.close(instant)
+			end
+		end
+		maid:give(userInputService.InputBegan:Connect(function(input)
+			if not openList then return end
+			if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+			local point = Vector2.new(input.Position.X, input.Position.Y)
+			for _, child in ipairs(overlay:GetChildren()) do
+				if child:IsA("GuiObject") and child.Visible then
+					local pos, size = child.AbsolutePosition, child.AbsoluteSize
+					if point.X >= pos.X and point.X <= pos.X + size.X and point.Y >= pos.Y and point.Y <= pos.Y + size.Y then return end
+				end
+			end
+			if openList and openList.field then
+				local pos, size = openList.field.AbsolutePosition, openList.field.AbsoluteSize
+				if point.X >= pos.X and point.X <= pos.X + size.X and point.Y >= pos.Y and point.Y <= pos.Y + size.Y then return end
+			end
+			closeList(false)
+		end))
+		frame:GetPropertyChangedSignal("Visible"):Connect(function() if not frame.Visible then closeList(true) end end)
 		for _, d in ipairs(defs) do d.key = d.key or d[3] end
 		local function read(def)
 			local value
@@ -14822,34 +15593,51 @@ function Menu.visuals(window, hk)
 			frame.Size = UDim2.fromOffset(250, 246 + 21 + (#tabsOrder > 1 and 28 or 0) + height)
 		end
 		local function showTab(name)
+			closeList(true)
 			activeTab = name
 			for _, row in ipairs(rows:GetChildren()) do
 				if row:IsA("Frame") then row.Visible = row:GetAttribute("Tab") == name end
 			end
-			for tab, button in pairs(tabButtons) do
-				button.BackgroundColor3 = tab == name and Color3.fromRGB(110, 130, 255) or Color3.fromRGB(38, 42, 58)
-				button.TextColor3 = tab == name and Color3.new(1, 1, 1) or TEXT_COLOR
-			end
+			for tab, button in pairs(tabButtons) do paintTab(button, tab == name) end
 			rows.CanvasPosition = Vector2.zero
 			relayout()
 		end
 		if #tabsOrder > 1 then
 			strip = Instance.new("Frame")
-			strip.Name, strip.LayoutOrder, strip.Size, strip.BackgroundTransparency, strip.BorderSizePixel, strip.ZIndex = "ExtraTabs", 50, UDim2.new(1, 0, 0, 24), 1, 0, z
+			strip.Name, strip.LayoutOrder, strip.Size, strip.BackgroundTransparency, strip.BorderSizePixel, strip.ZIndex = "ExtraTabs", 50, UDim2.new(1, 0, 0, 26), 1, 0, z
 			strip.Parent = frame
 			local layout = Instance.new("UIListLayout")
 			layout.FillDirection, layout.Padding, layout.SortOrder = Enum.FillDirection.Horizontal, UDim.new(0, 4), Enum.SortOrder.LayoutOrder
 			layout.Parent = strip
 			for order, tab in ipairs(tabsOrder) do
 				local button = Instance.new("TextButton")
-				button.Name, button.LayoutOrder, button.Size, button.AutoButtonColor, button.Text = tab, order, UDim2.new(1 / #tabsOrder, -4, 1, 0), false, tab
-				button.BackgroundColor3, button.BorderSizePixel, button.ZIndex, button.TextSize, button.Font = Color3.fromRGB(38, 42, 58), 0, z, 11, Enum.Font.GothamMedium
+				button.Name, button.LayoutOrder, button.Size, button.AutoButtonColor, button.Text = tab, order, UDim2.new(1 / #tabsOrder, -4, 1, -2), false, tab
+				button.BackgroundColor3, button.BackgroundTransparency, button.BorderSizePixel, button.ZIndex, button.TextSize, button.Font = NL.chip, 0.2, 0, z, 13, NL_FONT
+				button.TextColor3 = NL.muted
 				button:SetAttribute("Lv", 1)
 				button.Active = true
 				button.Parent = strip
 				local corner = Instance.new("UICorner")
-				corner.CornerRadius = UDim.new(0, 5)
+				corner.CornerRadius = UDim.new(0, 6)
 				corner.Parent = button
+				outline(button, 0.92)
+				local press = Instance.new("UIScale")
+				press.Parent = button
+				button.MouseEnter:Connect(function()
+					if button:GetAttribute("Selected") then return end
+					ease(button, { BackgroundColor3 = NL.chipHover, TextColor3 = Color3.fromRGB(205, 208, 220) }, 0.12)
+					local stroke = button:FindFirstChildOfClass("UIStroke")
+					if stroke then ease(stroke, { Transparency = 0.82 }, 0.12) end
+				end)
+				button.MouseLeave:Connect(function()
+					ease(press, { Scale = 1 }, 0.12)
+					if button:GetAttribute("Selected") then return end
+					ease(button, { BackgroundColor3 = NL.chip, TextColor3 = NL.muted }, 0.14)
+					local stroke = button:FindFirstChildOfClass("UIStroke")
+					if stroke then ease(stroke, { Transparency = 0.92 }, 0.14) end
+				end)
+				button.MouseButton1Down:Connect(function() ease(press, { Scale = 0.95 }, 0.08) end)
+				button.MouseButton1Up:Connect(function() ease(press, { Scale = 1 }, 0.2, Enum.EasingStyle.Back) end)
 				button.MouseButton1Click:Connect(function() showTab(tab) end)
 				tabButtons[tab] = button
 			end
@@ -14862,13 +15650,14 @@ function Menu.visuals(window, hk)
 			row.Visible = def.tab == activeTab
 			row.Parent = rows
 			local text = Instance.new("TextLabel")
-			text.BackgroundTransparency, text.Size, text.Text, text.TextSize = 1, UDim2.new(1, kind == "toggle" and -40 or kind == "color" and -40 or -130, 1, 0), label, 12
-			text.TextColor3, text.Font, text.TextXAlignment, text.ZIndex = TEXT_COLOR, Enum.Font.GothamMedium, Enum.TextXAlignment.Left, z
+			text.BackgroundTransparency, text.Size, text.Text, text.TextSize = 1, UDim2.new(1, kind == "toggle" and -44 or kind == "color" and -44 or kind == "slider" and -146 or -128, 1, 0), label, 14
+			text.TextColor3, text.Font, text.TextXAlignment, text.ZIndex = NL.text, NL_FONT, Enum.TextXAlignment.Left, z
+			text.TextTruncate = Enum.TextTruncate.AtEnd
 			text.Parent = row
 			if kind == "toggle" then
 				local pill = Instance.new("TextButton")
 				pill.AnchorPoint, pill.Position, pill.Size, pill.Text, pill.AutoButtonColor = Vector2.new(1, 0.5), UDim2.new(1, 0, 0.5, 0), UDim2.fromOffset(32, 16), "", false
-				pill.BackgroundColor3, pill.BorderSizePixel, pill.ZIndex = Color3.fromRGB(60, 64, 80), 0, z
+				pill.BackgroundColor3, pill.BorderSizePixel, pill.ZIndex = NL.track, 0, z
 				pill.Parent = row
 				local corner = Instance.new("UICorner")
 				corner.CornerRadius = UDim.new(1, 0)
@@ -14881,46 +15670,80 @@ function Menu.visuals(window, hk)
 				local knobCorner = Instance.new("UICorner")
 				knobCorner.CornerRadius = UDim.new(1, 0)
 				knobCorner.Parent = knob
-				local function paint(on)
-					pill.BackgroundColor3 = on and Color3.fromRGB(110, 130, 255) or Color3.fromRGB(60, 64, 80)
-					knob.Position = UDim2.new(0, on and 18 or 2, 0.5, 0)
+				local current = false
+				local function paint(on, instant)
+					current = on
+					local colorGoal = on and NL.accent or NL.track
+					local positionGoal = UDim2.new(0, on and 18 or 2, 0.5, 0)
+					if instant then
+						pill.BackgroundColor3, knob.Position = colorGoal, positionGoal
+					else
+						ease(pill, { BackgroundColor3 = colorGoal }, 0.2)
+						ease(knob, { Position = positionGoal }, 0.24, Enum.EasingStyle.Back)
+					end
 				end
+				pill.MouseEnter:Connect(function() ease(knob, { Size = UDim2.fromOffset(14, 12) }, 0.1) end)
+				pill.MouseLeave:Connect(function() ease(knob, { Size = UDim2.fromOffset(12, 12) }, 0.12) end)
 				pill.MouseButton1Click:Connect(function()
 					local on = not (read(def) and true or false)
 					write(def, on)
 					paint(on)
 				end)
+				paint(read(def) and true or false, true)
 				state.controls[#state.controls + 1] = function() paint(read(def) and true or false) end
 			elseif kind == "slider" then
 				local track = Instance.new("Frame")
-				track.AnchorPoint, track.Position, track.Size = Vector2.new(1, 0.5), UDim2.new(1, 0, 0.5, 0), UDim2.fromOffset(84, 5)
-				track.BackgroundColor3, track.BorderSizePixel, track.ZIndex = Color3.fromRGB(60, 64, 80), 0, z
+				track.AnchorPoint, track.Position, track.Size = Vector2.new(1, 0.5), UDim2.new(1, -46, 0.5, 0), UDim2.fromOffset(94, 4)
+				track.BackgroundColor3, track.BorderSizePixel, track.ZIndex = NL.track, 0, z
 				track.Parent = row
 				local trackCorner = Instance.new("UICorner")
 				trackCorner.CornerRadius = UDim.new(1, 0)
 				trackCorner.Parent = track
 				local fill = Instance.new("Frame")
-				fill.BackgroundColor3, fill.BorderSizePixel, fill.ZIndex = Color3.fromRGB(110, 130, 255), 0, z + 1
+				fill.BackgroundColor3, fill.BorderSizePixel, fill.ZIndex, fill.Size = NL.accent, 0, z + 1, UDim2.fromScale(0, 1)
 				fill:SetAttribute("Lv", 1)
 				fill.Parent = track
 				local fillCorner = Instance.new("UICorner")
 				fillCorner.CornerRadius = UDim.new(1, 0)
 				fillCorner.Parent = fill
+				local thumb = Instance.new("Frame")
+				thumb.AnchorPoint, thumb.Position, thumb.Size, thumb.BackgroundColor3 = Vector2.new(0.5, 0.5), UDim2.fromScale(0, 0.5), UDim2.fromOffset(10, 10), Color3.new(1, 1, 1)
+				thumb.BackgroundTransparency, thumb.BorderSizePixel, thumb.ZIndex = 1, 0, z + 2
+				thumb:SetAttribute("Lv", 2)
+				thumb.Parent = track
+				local thumbCorner = Instance.new("UICorner")
+				thumbCorner.CornerRadius = UDim.new(1, 0)
+				thumbCorner.Parent = thumb
 				local readout = Instance.new("TextLabel")
-				readout.AnchorPoint, readout.Position, readout.Size, readout.BackgroundTransparency = Vector2.new(1, 0.5), UDim2.new(1, -90, 0.5, 0), UDim2.fromOffset(40, 16), 1
-				readout.TextColor3, readout.Font, readout.TextSize, readout.TextXAlignment, readout.ZIndex = TEXT_COLOR, Enum.Font.GothamMedium, 11, Enum.TextXAlignment.Right, z
+				readout.AnchorPoint, readout.Position, readout.Size, readout.BackgroundTransparency = Vector2.new(1, 0.5), UDim2.new(1, 0, 0.5, 0), UDim2.fromOffset(42, 16), 1
+				readout.TextColor3, readout.Font, readout.TextSize, readout.TextXAlignment, readout.ZIndex = NL.muted, NL_FONT, 13, Enum.TextXAlignment.Right, z
 				readout.Parent = row
+				local shown, target, ready = 0, 0, false
+				local hovered, dragging = false, false
 				local function paint(value)
 					value = math.clamp(tonumber(value) or def.min, def.min, def.max)
-					fill.Size = UDim2.fromScale((value - def.min) / (def.max - def.min), 1)
+					target = (value - def.min) / math.max(def.max - def.min, 1)
+					if not ready then shown, ready = target, true end
 					readout.Text = tostring(value) .. (def.suffix or "")
 				end
+				animators[#animators + 1] = function(dt)
+					if not row.Visible then return end
+					local follow = 1 - math.exp(-dt * (dragging and 24 or 13))
+					if math.abs(target - shown) > 0.0004 then shown = shown + (target - shown) * follow else shown = target end
+					fill.Size = UDim2.fromScale(shown, 1)
+					thumb.Position = UDim2.fromScale(shown, 0.5)
+				end
+				local function highlight()
+					local on = hovered or dragging
+					ease(track, { Size = UDim2.fromOffset(94, on and 6 or 4) }, 0.14)
+					ease(thumb, { BackgroundTransparency = on and 0 or 1, Size = UDim2.fromOffset(on and 12 or 10, on and 12 or 10) }, 0.16)
+					ease(readout, { TextColor3 = on and NL.text or NL.muted }, 0.14)
+				end
 				local hit = Instance.new("TextButton")
-				hit.AnchorPoint, hit.Position, hit.Size, hit.BackgroundTransparency, hit.Text, hit.ZIndex = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), UDim2.new(1, 8, 0, 20), 1, "", z + 2
-				hit:SetAttribute("Lv", 2)
+				hit.AnchorPoint, hit.Position, hit.Size, hit.BackgroundTransparency, hit.Text, hit.ZIndex = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), UDim2.new(1, 10, 0, 22), 1, "", z + 3
+				hit:SetAttribute("Lv", 3)
 				hit.Active = true
 				hit.Parent = track
-				local dragging = false
 				local function apply()
 					local x = userInputService:GetMouseLocation().X
 					local alpha = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
@@ -14928,9 +15751,12 @@ function Menu.visuals(window, hk)
 					write(def, value)
 					paint(value)
 				end
+				hit.MouseEnter:Connect(function() hovered = true; highlight() end)
+				hit.MouseLeave:Connect(function() hovered = false; highlight() end)
 				hit.InputBegan:Connect(function(input)
 					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 						dragging = true
+						highlight()
 						apply()
 					end
 				end)
@@ -14938,37 +15764,182 @@ function Menu.visuals(window, hk)
 					if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then apply() end
 				end))
 				maid:give(userInputService.InputEnded:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+					if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+						dragging = false
+						highlight()
+					end
 				end))
+				paint(read(def))
 				state.controls[#state.controls + 1] = function() paint(read(def)) end
 			elseif kind == "dropdown" then
 				local button = Instance.new("TextButton")
-				button.AnchorPoint, button.Position, button.Size, button.AutoButtonColor = Vector2.new(1, 0.5), UDim2.new(1, 0, 0.5, 0), UDim2.fromOffset(120, 20), false
-				button.BackgroundColor3, button.BorderSizePixel, button.ZIndex = Color3.fromRGB(34, 38, 54), 0, z
-				button.TextColor3, button.Font, button.TextSize, button.TextTruncate = TEXT_COLOR, Enum.Font.GothamMedium, 11, Enum.TextTruncate.AtEnd
+				button.AnchorPoint, button.Position, button.Size, button.AutoButtonColor = Vector2.new(1, 0.5), UDim2.new(1, 0, 0.5, 0), UDim2.fromOffset(116, 22), false
+				button.BackgroundColor3, button.BackgroundTransparency, button.BorderSizePixel, button.ZIndex = NL.chip, 0.1, 0, z
+				button.TextColor3, button.Font, button.TextSize, button.TextTruncate = NL.text, NL_FONT, 13, Enum.TextTruncate.AtEnd
+				button.TextXAlignment = Enum.TextXAlignment.Left
 				button.Parent = row
 				local buttonCorner = Instance.new("UICorner")
-				buttonCorner.CornerRadius = UDim.new(0, 4)
+				buttonCorner.CornerRadius = UDim.new(0, 6)
 				buttonCorner.Parent = button
-				local function paint(value) button.Text = tostring(value or def.options[1]) end
-				local function step(direction)
-					local index = table.find(def.options, read(def)) or 1
-					index = (index - 1 + direction) % #def.options + 1
-					write(def, def.options[index])
-					paint(def.options[index])
+				local buttonPadding = Instance.new("UIPadding")
+				buttonPadding.PaddingLeft, buttonPadding.PaddingRight = UDim.new(0, 8), UDim.new(0, 20)
+				buttonPadding.Parent = button
+				outline(button, 0.92)
+				local arrow = Instance.new("ImageLabel")
+				arrow.AnchorPoint, arrow.Position, arrow.Size, arrow.BackgroundTransparency = Vector2.new(1, 0.5), UDim2.new(1, -6, 0.5, 0), UDim2.fromOffset(10, 10), 1
+				arrow.Image, arrow.ImageColor3, arrow.ScaleType, arrow.ZIndex = "rbxassetid://10709790948", NL.muted, Enum.ScaleType.Fit, z
+				arrow:SetAttribute("Lv", 1)
+				arrow.Parent = button
+				local optionButtons = {}
+				local popup, popupScale, popupStroke
+				local isOpen, token = false, 0
+				local function paint(value, animated)
+					value = value or def.options[1]
+					button.Text = tostring(value)
+					for option, optionButton in pairs(optionButtons) do
+						optionButton.TextColor3 = option == value and Color3.fromRGB(228, 228, 229) or Color3.fromRGB(175, 175, 180)
+					end
+					if animated then
+						button.TextTransparency = 0.7
+						ease(button, { TextTransparency = 0 }, 0.2)
+					end
 				end
-				button.MouseButton1Click:Connect(function() step(1) end)
-				button.MouseButton2Click:Connect(function() step(-1) end)
+				local function build()
+					local count = #def.options
+					local width = 124
+					for _, option in ipairs(def.options) do
+						local ok, measured = pcall(function() return game:GetService("TextService"):GetTextSize(tostring(option), 14, NL_FONT, Vector2.new(1000, 100)).X end)
+						width = math.max(width, (ok and measured or 60) + 40)
+					end
+					popup = Instance.new("Frame")
+					popup.Name, popup.Size, popup.BackgroundColor3, popup.BorderSizePixel, popup.Visible = "ExtraDropdown", UDim2.fromOffset(width, math.min(count, 8) * 30 + 10), Color3.fromRGB(17, 19, 28), 0, false
+					popup:SetAttribute("PopupWidth", width)
+					popup.Parent = overlay
+					local popupCorner = Instance.new("UICorner")
+					popupCorner.CornerRadius = UDim.new(0, 10)
+					popupCorner.Parent = popup
+					popupStroke = outline(popup, 0.92)
+					popupScale = Instance.new("UIScale")
+					popupScale.Parent = popup
+					local list = Instance.new("ScrollingFrame")
+					list.Name, list.Position, list.Size, list.BackgroundTransparency, list.BorderSizePixel = "List", UDim2.fromOffset(6, 6), UDim2.new(1, -12, 1, -12), 1, 0
+					list.ScrollBarThickness, list.CanvasSize, list.AutomaticCanvasSize, list.ScrollingDirection = 2, UDim2.new(), Enum.AutomaticSize.Y, Enum.ScrollingDirection.Y
+					list:SetAttribute("Lv", 1)
+					list.Parent = popup
+					local layout = Instance.new("UIListLayout")
+					layout.Padding, layout.SortOrder = UDim.new(0, 2), Enum.SortOrder.LayoutOrder
+					layout.Parent = list
+					for order, option in ipairs(def.options) do
+						local optionButton = Instance.new("TextButton")
+						optionButton.Name, optionButton.LayoutOrder, optionButton.Size, optionButton.AutoButtonColor = "Option", order, UDim2.new(1, 0, 0, 28), false
+						optionButton.BackgroundColor3, optionButton.BackgroundTransparency, optionButton.BorderSizePixel = Color3.new(1, 1, 1), 1, 0
+						optionButton.Text, optionButton.TextSize, optionButton.Font, optionButton.TextXAlignment = tostring(option), 14, NL_FONT, Enum.TextXAlignment.Left
+						optionButton.TextColor3 = Color3.fromRGB(175, 175, 180)
+						optionButton:SetAttribute("Lv", 2)
+						optionButton.Parent = list
+						local optionCorner = Instance.new("UICorner")
+						optionCorner.CornerRadius = UDim.new(0, 6)
+						optionCorner.Parent = optionButton
+						local optionPadding = Instance.new("UIPadding")
+						optionPadding.PaddingLeft, optionPadding.PaddingRight = UDim.new(0, 12), UDim.new(0, 8)
+						optionPadding.Parent = optionButton
+						optionButton.MouseEnter:Connect(function() ease(optionButton, { BackgroundTransparency = 0.94 }, 0.09, Enum.EasingStyle.Sine) end)
+						optionButton.MouseLeave:Connect(function() ease(optionButton, { BackgroundTransparency = 1 }, 0.12, Enum.EasingStyle.Sine) end)
+						optionButton.MouseButton1Click:Connect(function()
+							write(def, option)
+							paint(option, true)
+							closeList(false)
+						end)
+						optionButtons[option] = optionButton
+					end
+					raiseOverlay()
+					paint(read(def))
+				end
+				local function closeThis(instant)
+					isOpen = false
+					token = token + 1
+					local mine = token
+					ease(arrow, { Rotation = 0 }, 0.16)
+					if not popup then return end
+					if instant then
+						popup.Visible = false
+						return
+					end
+					ease(popup, { BackgroundTransparency = 1 }, 0.1, Enum.EasingStyle.Quad)
+					ease(popupStroke, { Transparency = 1 }, 0.1)
+					ease(popupScale, { Scale = 0.985 }, 0.12, Enum.EasingStyle.Quad)
+					for _, optionButton in pairs(optionButtons) do ease(optionButton, { TextTransparency = 1 }, 0.08) end
+					task.delay(0.13, function()
+						if token == mine and popup then popup.Visible = false end
+					end)
+				end
+				local function openThis()
+					if isOpen then closeList(false) return end
+					closeList(false)
+					if not popup then build() end
+					isOpen = true
+					token = token + 1
+					openList = { close = closeThis, field = button }
+					raiseOverlay()
+					local scaleX = frame.AbsoluteSize.X / math.max(frame.Size.X.Offset, 1)
+					local scaleY = frame.AbsoluteSize.Y / math.max(frame.Size.Y.Offset, 1)
+					local width, height = popup:GetAttribute("PopupWidth") * scaleX, popup.Size.Y.Offset * scaleY
+					local fieldPos, fieldSize = button.AbsolutePosition, button.AbsoluteSize
+					local x = fieldPos.X + (fieldSize.X - width) / 2
+					local y = fieldPos.Y + (fieldSize.Y - height) / 2
+					local bounds = frame.Parent
+					if bounds and bounds:IsA("GuiObject") then
+						x = math.clamp(x, bounds.AbsolutePosition.X + 6, math.max(bounds.AbsolutePosition.X + bounds.AbsoluteSize.X - width - 6, bounds.AbsolutePosition.X + 6))
+						y = math.clamp(y, bounds.AbsolutePosition.Y + 6, math.max(bounds.AbsolutePosition.Y + bounds.AbsoluteSize.Y - height - 6, bounds.AbsolutePosition.Y + 6))
+					end
+					popup.Position = UDim2.fromOffset((x - overlay.AbsolutePosition.X) / math.max(scaleX, 0.01), (y - overlay.AbsolutePosition.Y) / math.max(scaleY, 0.01))
+					popup.BackgroundTransparency = 1
+					popupStroke.Transparency = 1
+					popupScale.Scale = 0.965
+					popup.Visible = true
+					ease(popup, { BackgroundTransparency = 0 }, 0.14)
+					ease(popupStroke, { Transparency = 0.92 }, 0.14)
+					ease(popupScale, { Scale = 1 }, 0.17)
+					ease(arrow, { Rotation = 180 }, 0.16)
+					local order = 0
+					for _, option in ipairs(def.options) do
+						local optionButton = optionButtons[option]
+						if optionButton then
+							optionButton.TextTransparency = 1
+							task.delay(order * 0.018, function()
+								if isOpen then ease(optionButton, { TextTransparency = 0 }, 0.14) end
+							end)
+							order = order + 1
+						end
+					end
+				end
+				button.MouseEnter:Connect(function()
+					ease(button, { BackgroundColor3 = NL.chipHover, BackgroundTransparency = 0 }, 0.12)
+					local stroke = button:FindFirstChildOfClass("UIStroke")
+					if stroke then ease(stroke, { Transparency = 0.8 }, 0.12) end
+					ease(arrow, { ImageColor3 = NL.text }, 0.12)
+				end)
+				button.MouseLeave:Connect(function()
+					ease(button, { BackgroundColor3 = NL.chip, BackgroundTransparency = 0.1 }, 0.14)
+					local stroke = button:FindFirstChildOfClass("UIStroke")
+					if stroke then ease(stroke, { Transparency = 0.92 }, 0.14) end
+					ease(arrow, { ImageColor3 = NL.muted }, 0.14)
+				end)
+				button.MouseButton1Click:Connect(openThis)
+				paint(read(def))
 				state.controls[#state.controls + 1] = function() paint(read(def)) end
 			else
 				local key = def[3]
 				local swatch = Instance.new("ImageButton")
-				swatch.AnchorPoint, swatch.Position, swatch.Size, swatch.AutoButtonColor, swatch.Image = Vector2.new(1, 0.5), UDim2.new(1, 0, 0.5, 0), UDim2.fromOffset(32, 18), false, ""
+				swatch.AnchorPoint, swatch.Position, swatch.Size, swatch.AutoButtonColor, swatch.Image = Vector2.new(1, 0.5), UDim2.new(1, 0, 0.5, 0), UDim2.fromOffset(34, 18), false, ""
 				swatch.BackgroundColor3, swatch.BorderSizePixel, swatch.ZIndex = Color3.new(1, 1, 1), 0, z
 				swatch.Parent = row
 				local corner = Instance.new("UICorner")
-				corner.CornerRadius = UDim.new(0, 4)
+				corner.CornerRadius = UDim.new(0, 5)
 				corner.Parent = swatch
+				outline(swatch, 0.85)
+				swatch.MouseEnter:Connect(function() ease(swatch, { Size = UDim2.fromOffset(38, 18) }, 0.12) end)
+				swatch.MouseLeave:Connect(function() ease(swatch, { Size = UDim2.fromOffset(34, 18) }, 0.14) end)
 				local sub = createPicker(swatch, esp.colors.Enemies[key] or Color3.new(1, 1, 1), function(color)
 					esp.colors[state.team][key] = color
 					swatch.BackgroundColor3 = color
@@ -14980,10 +15951,17 @@ function Menu.visuals(window, hk)
 				end
 			end
 		end
+		if #animators > 0 then
+			maid:give(game:GetService("RunService").RenderStepped:Connect(function(dt)
+				if not rows.Parent then return end
+				for _, animate in ipairs(animators) do animate(dt) end
+			end))
+		end
 		showTab(activeTab)
 		local function lift()
 			if not rows.Parent then return end
 			local top = frame.ZIndex + 8
+			raiseOverlay(top)
 			rule.ZIndex, rows.ZIndex = top - 1, top - 1
 			for _, d in ipairs(rows:GetDescendants()) do
 				if d:IsA("GuiObject") then d.ZIndex = top + (d:GetAttribute("Lv") or 0) end
@@ -15410,7 +16388,20 @@ function Menu.aimbot(window, hk)
 	end)
 	SilentSettings:AddDropdown("Hitbox", { "Head", "Chest", "Stomach", "Nearest" }, rage.silentHitbox, set(rage, "silentHitbox"))
 	hk["Automatic Fire"] = RageMain:AddToggle("Automatic Fire", rage.autoFire, set(rage, "autoFire"))
-	RageMain:AddToggle("Origin Scan", rage.originScan, set(rage, "originScan")):AddSettings():AddSlider("Range", 1, 8, rage.originRange, set(rage, "originRange"), " st")
+	local OriginSettings = RageMain:AddToggle("Origin Scan", rage.originScan, set(rage, "originScan")):AddSettings()
+	OriginSettings:AddSlider("Range", 1, 9, rage.originRange, set(rage, "originRange"), " st")
+	tip(OriginSettings:AddToggle("Debug Model", rage.originDebug, set(rage, "originDebug")), "Shows the real shot origin, the scanned point and where the last bullet left from")
+	OriginSettings:AddToggle("Probe Report", false, function(value)
+		if not value then return end
+		local ok, text = pcall(Rage.probeOrigin)
+		if not ok then
+			Logs.push("Combat", "origin probe failed · " .. tostring(text))
+			return
+		end
+		if setclipboard then pcall(setclipboard, text) end
+		if writefile then pcall(writefile, "nev_origin_probe.txt", text) end
+		Logs.push("Combat", "origin probe copied · nev_origin_probe.txt")
+	end)
 	RageMain:AddSlider("Max Walls", 0, 3, rage.maxWalls, set(rage, "maxWalls"), " w")
 	tip(RageMain:AddToggle("Aim Through Walls", rage.autowall, set(rage, "autowall")), "Capped at what the weapon really penetrates")
 	RageMain:AddSlider("Wall Min Damage", 0, 100, rage.wallMinDamage, set(rage, "wallMinDamage")):SetDisplay(function(v) return v == 0 and "any" or nil end)

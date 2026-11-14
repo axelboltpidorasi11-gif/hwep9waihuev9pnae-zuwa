@@ -7706,10 +7706,9 @@ function EspObject:glowRect(key, x, y, w, h, color, size, power, round)
 	for index, stroke in ipairs(kit.strokes) do
 		stroke.Color = color
 		stroke.Thickness, stroke.Transparency = glowLayerStyle(GLOW_LAYERS[index], size, power)
-		if round ~= nil then
-			kit.corners[index].CornerRadius = UDim.new(0, round > 0 and round + GLOW_LAYERS[index].radius or 0)
-			stroke.LineJoinMode = round > 0 and Enum.LineJoinMode.Round or Enum.LineJoinMode.Miter
-		end
+		-- Свечение всегда острое: без скруглений и round-стыков, иначе рамка выглядит овальной.
+		kit.corners[index].CornerRadius = UDim.new(0, 0)
+		stroke.LineJoinMode = Enum.LineJoinMode.Miter
 	end
 end
 
@@ -8185,24 +8184,17 @@ function EspObject:drawPixelBox(x, y, w, h, colors, boxColor, c, classic)
 		strip(x, y + c, c, innerH, false, splitY)
 		strip(x + w - c, y + c, c, innerH, false, splitY)
 	else
-		local innerW, innerH = w - 4 * c, h - 4 * c
-		shade(x + 2 * c, y, innerW, c)
-		shade(x + 2 * c, y + h - c, innerW, c)
-		shade(x, y + 2 * c, c, innerH)
-		shade(x + w - c, y + 2 * c, c, innerH)
-		shade(x + c, y + c, c, c)
-		shade(x + w - 2 * c, y + c, c, c)
-		shade(x + c, y + h - 2 * c, c, c)
-		shade(x + w - 2 * c, y + h - 2 * c, c, c)
+		-- Pixel: прямоугольник без срезанных углов. Полосы идут по всей длине сторон,
+		-- углы закрыты полосами, а не одиночными ячейками, поэтому контур не выглядит овальным.
+		shade(x, y, w, c)
+		shade(x, y + h - c, w, c)
+		shade(x, y + c, c, h - 2 * c)
+		shade(x + w - c, y + c, c, h - 2 * c)
 
-		strip(x + 2 * c, y, innerW, c, true, splitX)
-		strip(x + 2 * c, y + h - c, innerW, c, true, splitX)
-		strip(x, y + 2 * c, c, innerH, false, splitY)
-		strip(x + w - c, y + 2 * c, c, innerH, false, splitY)
-		put(x + c, y + c, c, c)
-		put(x + w - 2 * c, y + c, c, c)
-		put(x + c, y + h - 2 * c, c, c)
-		put(x + w - 2 * c, y + h - 2 * c, c, c)
+		strip(x, y, w, c, true, splitX)
+		strip(x, y + h - c, w, c, true, splitX)
+		strip(x, y + c, c, h - 2 * c, false, splitY)
+		strip(x + w - c, y + c, c, h - 2 * c, false, splitY)
 	end
 
 	for index = used + 1, #rects do rects[index].Visible = false end
@@ -8983,6 +8975,17 @@ function EspObject:update(delta)
 		end
 	end
 
+	if colors.fixedBox ~= true then
+		local minWidth = math.max(height * 0.5, 6)
+		if width < minWidth then
+			width = minWidth
+			position = Vector2.new(rootPoint.X - width / 2, position.Y)
+		end
+		width, height = math.floor(width + 0.5), math.floor(height + 0.5)
+		position = Vector2.new(math.floor(position.X + 0.5), math.floor(position.Y + 0.5))
+		size = Vector2.new(width, height)
+	end
+
 	local naturalHeight, skelScale = height, 1
 	if colors.fixedBox == true then
 		width = math.clamp(colors.fixedW or 46, 10, 400)
@@ -9037,8 +9040,9 @@ function EspObject:update(delta)
 	local reference = showBox and (style == "Reference" or style == "Reference Filled")
 	local corners = showBox and style == "Corners"
 	local plain = showBox and not corners and not pixel and not classic and not reference
-	local round = math.clamp(math.floor(colors.boxRound or 0), 0, 20)
-	local rounded = round > 0 and (plain or reference)
+	-- Коробка всегда прямоугольная: скругление не применяется.
+	local round = 0
+	local rounded = false
 	if rounded and plain then plain, reference = false, true end
 	local gradient = plain and colors.boxGradient
 	local cell = math.clamp(math.floor(colors.boxThick or 2), 1, 4)
@@ -10878,7 +10882,7 @@ function Preview.update()
 	local pixelBox = showBox and (style == "Pixel" or style == "Pixel Filled")
 	local classicBox = showBox and (style == "Classic" or style == "Classic Filled")
 	local referenceBox = showBox and (style == "Reference" or style == "Reference Filled")
-	local boxRadius = (showBox and not pixelBox and not classicBox and style ~= "Corners") and math.clamp(math.floor(colors.boxRound or 0), 0, 20) or 0
+	local boxRadius = 0
 	local corners = showBox and (style == "Corners" or (referenceBox and boxRadius == 0))
 	local plain = showBox and style ~= "Corners"
 	local filled = showBox and (style == "Filled" or style == "Pixel Filled" or style == "Classic Filled" or style == "Reference Filled")

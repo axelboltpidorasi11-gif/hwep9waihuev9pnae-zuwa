@@ -199,14 +199,15 @@ Neverlose.config = {
 	rage = {
 		enabled = false, fov = 180, priority = "Distance", showFov = false, delayWait = { "Hit Chance" }, delayDamage = 50, delayChance = 60, delayMax = 400,
 		silent = false, silentAuto = true, silentHitChance = 100, silentHitbox = "Head",
-		autoFire = false, autowall = false, wallMinDamage = 0,
+		autoFire = false, autowall = false, wallLimit = false, wallMinDamage = 0,
 		target = "Highest Damage", hitboxes = "Head, Chest, Stomach", multipoint = "Head, Chest, Stomach",
 		hitChance = 50, minDamage = 15, quickStop = false, quickScope = false,
 		history = "High", bodyAfterMiss = true, autoHitChance = true, delayShot = {}, noRecoil = false, recoilReduction = 100, noSpread = false,
-		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 8, originScans = 4, originScanMode = "optimized", originDebug = false, originModel = "Saturn", maxWalls = 2, peekReturn = "Shot",
-		preferBodyLethal = false, preferHead = true, scanMode = "Balanced", stickyTarget = false, forceBody = false, missToBody = false, missesToBody = 2, maxDist = 0, multiTarget = false, scanHz = 30, minDmgOverride = false, minDmgOverrideValue = 5,
+		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 8, originScans = 4, originScanMode = "optimized", originDebug = false, originModel = "Saturn", originProbeLog = false, spotFind = true, spotRadius = 0.6, weaponProfilesOn = true, maxWalls = 2, multiRay = 3, peekReturn = "Shot",
+		preferBodyLethal = false, preferHead = true, scanMode = "Balanced", stickyTarget = false, forceBody = false, missToBody = false, missesToBody = 2, maxDist = 0, multiTarget = false, scanHz = 120, minDmgOverride = false, minDmgOverrideValue = 5,
+		multipointCount = 4, multipointVisual = true, multipointColor = rgb(70, 205, 255),
 		autoReload = false, reloadAt = 1, remoteReload = false, instaReload = false, reloadSpeed = 3,
-		hitboxList = { "Head", "Chest", "Stomach" }, multipointList = { "Head", "Chest" },
+		hitboxList = { "Head", "Chest", "Stomach" }, multipointList = { "Head", "Chest" }, weaponProfiles = {},
 	},
 	aa = {
 		enabled = false, pitch = "Off", yaw = "Off", freestanding = "Off", mouseOverride = "Off",
@@ -1050,6 +1051,23 @@ function Ballistics.wallPenalty(material, thickness)
 	return factor * thin
 end
 
+-- Вес материала для выбора линии: сколько «стоит» стадо этой стены.
+-- Металл/бетон дороже дерева, стекло почти бесплатно. Нужен только чтобы
+-- между двумя валидными линиями с одинаковым числом стен выбрать более
+-- надёжную (тоньше и мягче), урон при этом не меняется.
+Ballistics.wallWeight = {
+	[Enum.Material.Glass] = 0.35, [Enum.Material.Plastic] = 0.6, [Enum.Material.SmoothPlastic] = 0.6,
+	[Enum.Material.Wood] = 0.7, [Enum.Material.WoodPlanks] = 0.7, [Enum.Material.Cardboard] = 0.55,
+	[Enum.Material.Fabric] = 0.5, [Enum.Material.Metal] = 2.2, [Enum.Material.CorrodedMetal] = 2.4,
+	[Enum.Material.DiamondPlate] = 2.8, [Enum.Material.Concrete] = 2.0, [Enum.Material.Brick] = 2.0,
+	[Enum.Material.Cobblestone] = 1.8, [Enum.Material.Slate] = 2.4, [Enum.Material.Basalt] = 2.4,
+	[Enum.Material.Granite] = 2.4, [Enum.Material.Marble] = 2.4,
+}
+
+function Ballistics.wallCost(material, thickness)
+	return (thickness or 1) * (Ballistics.wallWeight[material] or 1.5)
+end
+
 -- Autowall как в шитаро: накопленная толщина по материалу (или варианту),
 -- толщина по лучу назад от выхода, порог = бонус материала + Penetration оружия,
 -- карта Reactor даёт -1 к бонусу нулевых материалов.
@@ -1071,57 +1089,18 @@ Ballistics.matBlocked = {}
 -- Per-material share of the computed penetration the server really allows; learned from wall shot results.
 Ballistics.penScale = {}
 
--- The game ships its own penetration code (ReplicatedStorage.Shared.Raycast); the server runs the same rules.
--- Asking it directly tells us exactly which wall shots the server will let through.
-local oracleFn = type(Game.modules.raycast) == "table" and rawget(Game.modules.raycast, "castThroughDistance") or nil
-
-local function oracleTrace(origin, direction, range, character, maxWalls, pen)
-	if type(oracleFn) ~= "function" or not character then return nil end
-	local ok, list = pcall(oracleFn, origin, direction.Unit * range, pen, Ballistics.ignoreList(), character)
-	if not ok or type(list) ~= "table" then return nil end
-
-	local hits, seen, walls, reached = {}, {}, 0, false
-	for _, entry in ipairs(list) do
-		local instance = entry.instance
-		if typeof(instance) ~= "Instance" then break end
-		local isExit = seen[instance] == true
-		hits[#hits + 1] = {
-			Instance = instance, Position = entry.position, Normal = entry.normal,
-			Material = tostring(entry.material and entry.material.Name or entry.material), Exit = isExit,
-		}
-		if instance:IsDescendantOf(character) then reached = true break end
-		if not isExit then
-			seen[instance] = true
-			if not Ballistics.isGlass(instance) then walls += 1 end
-		end
-	end
-	if walls > maxWalls then reached = false end
-	return hits, reached, walls
-end
-
-function Ballistics.trace(origin, direction, range, targetCharacter, maxWalls, penetration)
-	local weapon = Game.weapon()
-	local pen = penetration or (weapon and weapon.Properties and weapon.Properties.Penetration) or 0
-	local hits, reached, walls = oracleTrace(origin, direction, range, targetCharacter, maxWalls or 0, pen)
-	if not hits then return Ballistics.traceLocal(origin, direction, range, targetCharacter, maxWalls, penetration) end
-	if walls == 0 or not reached then return hits, reached, walls end
-	-- A wall shot needs both the game's rules and the learned local thickness check to agree.
-	local lhits, lreached, lwalls = Ballistics.traceLocal(origin, direction, range, targetCharacter, maxWalls, penetration)
-	if reached and not lreached then return lhits, false, lwalls end
-	return hits, reached, walls
-end
-
-function Ballistics.traceLocal(origin, direction, range, targetCharacter, maxWalls, penetration)
+-- UT 1:1 из zypdm | dumpf1x: один луч, накопленная толщина по материалу
+-- (или MaterialVariant), порог = бонус материала + Penetration оружия.
+-- Ни oracle, ни маржи, ни penScale: стекло тоже считается стеной, как у них.
+local function traceOnce(origin, direction, range, targetCharacter, penetration)
 	traceParams.FilterDescendantsInstances = Ballistics.ignoreList()
 
-	local weapon = Game.weapon()
-	local pen = penetration or (weapon and weapon.Properties and weapon.Properties.Penetration) or 0
 	local dir = direction.Unit
 	local hits, walls, cursor = {}, 0, origin
-	local characters = workspaceService:FindFirstChild("Characters")
-	local spent = {}
+	local spent, spentVariant = {}, {}
+	local cost = 0
 
-	for _ = 1, 48 do
+	for _ = 1, 64 do
 		local remaining = range - (cursor - origin).Magnitude
 		if remaining <= 0 then break end
 
@@ -1131,49 +1110,67 @@ function Ballistics.traceLocal(origin, direction, range, targetCharacter, maxWal
 
 		local part = result.Instance
 		if not isPassThrough(part) then
-			local blockedUntil = Ballistics.blocked[part]
-			if blockedUntil and blockedUntil > os.clock() and not (characters and part:IsDescendantOf(characters)) then
-				hits[#hits + 1] = toHit(result, false)
-				return hits, false, walls + 1
-			end
-			if targetCharacter and part:IsDescendantOf(targetCharacter) then
-				hits[#hits + 1] = toHit(result, false)
-				return hits, true, walls
-			end
-			if characters and part:IsDescendantOf(characters) then
-				hits[#hits + 1] = toHit(result, false)
-				return hits, targetCharacter == nil, walls
-			end
-
-			if not Ballistics.isGlass(part) then walls += 1 end
 			hits[#hits + 1] = toHit(result, false)
-			if walls > maxWalls then return hits, false, walls end
+			if targetCharacter and part:IsDescendantOf(targetCharacter) then return hits, true, walls, cost end
 
-			-- Луч назад от входа: даёт выход и толщину стены.
-			exitParams.FilterDescendantsInstances = { part }
-			local far = result.Position + dir * 1000
-			local back = workspaceService:Raycast(far, result.Position - far, exitParams)
-			if not back then return hits, false, walls end
-
-			local thickness = (back.Position - result.Position).Magnitude
-			local variant = part.MaterialVariant
-			local key, bonus
-			if variant ~= "" and Ballistics.penVariants[variant] then
-				key, bonus = variant, 0
+			if penetration == math.huge then
+				-- wallLimit: стена считается, но не мешает (урон потом как без стен).
+				exitParams.FilterDescendantsInstances = { part }
+				local far = result.Position + dir * 1000
+				local back = workspaceService:Raycast(far, result.Position - far, exitParams)
+				if back then
+					cost += Ballistics.wallCost(wallMaterial(part), (result.Position - back.Position).Magnitude)
+				end
+				walls += 1
+				cursor = result.Position + dir * 0.01
 			else
-				key = wallMaterial(part)
-				bonus = Ballistics.penBonus[key] or 0
+				-- Луч назад от входа: даёт выход и толщину стены.
+				exitParams.FilterDescendantsInstances = { part }
+				local far = result.Position + dir * 1000
+				local back = workspaceService:Raycast(far, result.Position - far, exitParams)
+				if not back then return hits, false, walls, cost end
+
+				local thickness = (result.Position - back.Position).Magnitude
+				local material = wallMaterial(part)
+				cost += Ballistics.wallCost(material, thickness)
+				local variant = part.MaterialVariant
+				if variant ~= "" and Ballistics.penVariants[variant] then
+					spentVariant[variant] = (spentVariant[variant] or 0) + thickness
+					if spentVariant[variant] > penThreshold(0) + penetration then return hits, false, walls, cost end
+				else
+					spent[material] = (spent[material] or 0) + thickness
+					if spent[material] > penThreshold(Ballistics.penBonus[material] or 0) + penetration then
+						return hits, false, walls, cost
+					end
+				end
+
+				hits[#hits + 1] = toHit(back, true)
+				walls += 1
+				cursor = back.Position + dir * 0.001
 			end
-
-			spent[key] = (spent[key] or 0) + thickness
-			if spent[key] > (penThreshold(bonus) + pen) * (Ballistics.penScale[key] or 0.75) then return hits, false, walls end
-
-			hits[#hits + 1] = toHit(back, true)
-			cursor = back.Position + dir * 0.001
 		end
 	end
 
-	return hits, false, walls
+	return hits, false, walls, cost
+end
+Ballistics.traceRaw = traceOnce
+
+-- uT 1:1: в server hit-mode всегда Penetration оружия; wallLimit на клиенте
+-- даёт бесконечное пробитие, а число стен проверяет вызывающий код.
+function Ballistics.trace(origin, direction, range, targetCharacter, maxWalls, penetration)
+	local pen = penetration
+	if pen == nil then
+		local weapon = Game.weapon()
+		local properties = weapon and weapon.Properties
+		if not Game.serverHits and Neverlose.config.rage.wallLimit then
+			pen = math.huge
+		else
+			pen = properties and properties.Penetration or 0
+		end
+	end
+	local hits, reached, walls, cost = traceOnce(origin, direction, range, targetCharacter, pen)
+	if reached and (maxWalls or 0) < walls then reached = false end
+	return hits, reached, walls, cost or 0
 end
 
 
@@ -1223,33 +1220,27 @@ function Ballistics.withDistances(origin, hits)
 	return hits
 end
 
--- Урон как в шитаро: falloff по дистанции, один WallbangMultiplier за пробитие,
--- броня: часть урона уходит в броню (до её запаса), остаток идёт в HP.
-function Ballistics.damage(properties, partName, distance, walls, character)
+-- Урон 1:1 из zypdm | dumpf1x: falloff по дистанции, один WallbangMultiplier
+-- за все стены, броня — множитель ArmorPenetration (в ноги броня не идёт,
+-- в голову — только в шлеме).
+function Ballistics.damage(properties, partName, distance, walls, character, penalty)
 	local group = PART_GROUP[partName]
 	local perPart = properties and properties.DamagePerPart
 	if not group or type(perPart) ~= "table" or not perPart[group] then
 		return properties and properties.Damage or 0
 	end
 
-	local base = perPart[group]
-	if base <= 0 then return 0 end
+	local damage = perPart[group]
+	if damage <= 0 then return 0 end
 
-	local damage = base * (properties.RangeModifier or 1) ^ math.max((distance / 0.075) / 500, 0)
+	damage = damage * (properties.RangeModifier or 1) ^ ((distance / 0.075) / 500)
 	if walls > 0 then
-		damage *= (properties.WallbangMultiplier or 0.5) ^ walls
+		damage = damage * (properties.WallbangMultiplier or 0.5) ^ walls
 	end
 
 	local armor, helmet = Game.armor(character)
-	if armor > 0 and (group ~= "Head" or helmet) then
-		local armorPen = math.clamp(properties.ArmorPenetration or 1, 0, 1)
-		local after = damage * armorPen
-		local absorbed = (damage - after) * 0.5
-		if absorbed > armor then
-			absorbed = armor
-			after = damage - armor / 0.5
-		end
-		damage = math.max(after, 0)
+	if armor > 0 and (group ~= "Legs" and (group ~= "Head" or helmet)) then
+		damage = damage * (properties.ArmorPenetration or 1)
 	end
 
 	return damage * (properties.BulletsPerShot or 1)
@@ -1257,26 +1248,18 @@ end
 
 
 function Ballistics.allowedWalls(weapon, enabled, cap)
-	if not enabled then return 0 end
-	-- Three wall shots in a row that the server did not take: pause wallbangs for a while.
-	if os.clock() < (Ballistics.wallPause or 0) then return 0 end
 	local config = Neverlose.config.rage
-	-- Сколько стен вообще считать, задаёт пользователь (Max Walls). Реальную
-	-- возможность пробития проверяет Ballistics.trace — по материалу, толщине
-	-- и Penetration оружия. Раньше здесь была эвристика от Penetration/10,
-	-- которая при Penetration 0.9 (SSG 08) резала всё до одной стены, хотя
-	-- WallbangMultiplier 0.98 позволяет пробивать заметно больше.
-	local base = tonumber(cap) or tonumber(config.maxWalls) or 2
-	base = math.clamp(math.floor(base), 0, 4)
-	if base <= 0 then return 0 end
-
-	-- Мягкий выученный лимит: сервер уже отклонял пробития с таким числом стен.
-	-- Живёт 20 секунд, чтобы одна неудачная серия не отключала автоволл на
-	-- весь матч, и восстанавливается первым же успешным пробитием.
-	local stats = Neverlose.stats or {}
-	local learned = weapon and Ballistics.wallLimit[weapon.Name]
-	if learned and os.clock() < learned.expires then return math.max(math.min(base, learned.limit), 0) end
-	return base
+	-- wallLimit 1:1 из dumpfix: не больше Max Walls стен на выстрел.
+	if config.wallLimit then
+		local limit = tonumber(config.maxWalls) or 1
+		return math.clamp(math.floor(limit), 0, 16)
+	end
+	if not enabled then return 0 end
+	-- rageAutowall 1:1 из dumpfix: число стен не ограничено, реальное пробитие
+	-- решает Ballistics.trace по материалу/толщине/Penetration, а урон падает
+	-- через WallbangMultiplier. Прежний выученный wallPause только терял
+	-- валидные пробития, поэтому его здесь больше нет.
+	return 16
 end
 
 local velocities = setmetatable({}, { __mode = "k" })
@@ -1382,16 +1365,22 @@ function Ballistics.smoothVelocity(entity, position, now)
 	return (newer + older) * 0.5
 end
 
-function Ballistics.points(part, enabled)
+function Ballistics.points(part, enabled, count)
 	local points = { part.Position }
-	if not enabled then return points end
-	local half = part.Size * 0.25
+	local extra = tonumber(count)
+	if extra == nil then extra = enabled and 4 or 0 end
+	extra = math.clamp(math.floor(extra), 0, 10)
+	if not enabled or extra <= 0 then return points end
 	local cf = part.CFrame
-	points[#points + 1] = cf * Vector3.new(0, half.Y, 0)
-	points[#points + 1] = cf * Vector3.new(half.X, 0, 0)
-	points[#points + 1] = cf * Vector3.new(-half.X, 0, 0)
-	if part.Name ~= "Head" then
-		points[#points + 1] = cf * Vector3.new(0, -half.Y, 0)
+	-- Точки внутри хитбокса по спирали: детерминированные (кэш не дёргается),
+	-- всегда внутри парта, радиус от меньшей стороны.
+	local radius = math.min(part.Size.X, part.Size.Y, part.Size.Z) * 0.32
+	if radius < 0.05 then return points end
+	for index = 1, extra do
+		local y = 1 - (2 * (index - 0.5)) / extra
+		local ring = math.sqrt(math.max(1 - y * y, 0))
+		local angle = index * 2.399963229728653
+		points[#points + 1] = cf:PointToWorldSpace(Vector3.new(math.cos(angle) * ring, y, math.sin(angle) * ring) * radius)
 	end
 	return points
 end
@@ -3322,6 +3311,10 @@ function ShotTracker.register(origin, direction, hits, range, tap, expect, info)
 				wallParts[#wallParts + 1] = hit.Instance
 			end
 		end
+		-- Живой Probe Report: запись на каждый смещённый выстрел, результат допишется позже.
+		if info and info.shifted and Neverlose.Rage and Neverlose.Rage.logOriginShot then
+			info.originEvent = Neverlose.Rage.logOriginShot(origin, info, enemyEntity, wallCount)
+		end
 		local heldWeapon = Game.weapon()
 
 		local previous = ShotTracker.pending[enemyEntity]
@@ -3357,6 +3350,7 @@ function ShotTracker.flushPending(entity, shot)
 	local health = character and character:GetAttribute("Health")
 	if type(health) == "number" and health < shot.hp then
 		Logs.push("Combat", ("hit {%s} in the %s for {%d} damage ({%d} health left)"):format(tostring(entity.DisplayName or entity.Name), bodyPhrase(shot.part), shot.hp - health, math.max(math.floor(health + 0.5), 0)))
+		if Neverlose.Rage and Neverlose.Rage.resolveOriginShot then Neverlose.Rage.resolveOriginShot(shot, true) end
 		Events.fire("hit", entity, shot, shot.hp - health)
 	else
 		ShotTracker.logMiss(entity, shot)
@@ -3368,6 +3362,17 @@ function ShotTracker.logMiss(entity, shot)
 	if shot.character and shot.character.Parent and Game.isImmune(shot.character) then return end
 	local name = tostring(entity.DisplayName or entity.Name)
 	local reason, detail = ShotTracker.missReason(shot, entity)
+	if Neverlose.Rage and Neverlose.Rage.resolveOriginShot then Neverlose.Rage.resolveOriginShot(shot, false, reason) end
+	-- Последний мисс — чтобы Probe Report мог ответить «почему» даже если
+	-- событие origin не создавалось (прямой выстрел, без сдвига).
+	local stats = Neverlose.stats or {}
+	Neverlose.stats = stats
+	stats.lastMiss = {
+		name = name, part = shot.part, reason = reason, detail = detail,
+		walls = shot.walls or 0, distance = shot.info and shot.info.distance,
+		shifted = shot.info and shot.info.shifted == true,
+		stamp = os.date("%H:%M:%S"),
+	}
 	Logs.push("Combat", ("missed {%s} ({%s}) · {%s}%s"):format(name, shot.part, reason, detail))
 	HitSounds.play("miss")
 	pcall(function()
@@ -3506,6 +3511,7 @@ maid:give(runService.Heartbeat:Connect(function()
 			markerUntil, markerKill = now + 0.45, true
 			playHitSound("kill")
 			Logs.push("Combat", ("killed {%s} ({%s})"):format(name, shot.part))
+			if Neverlose.Rage and Neverlose.Rage.resolveOriginShot then Neverlose.Rage.resolveOriginShot(shot, true) end
 			pcall(HitEffects.world, shot.hitPos, true)
 			pcall(Neverlose.Vfx.hit, shot.hitPos, shot.part, true)
 			Events.fire("kill", entity, shot)
@@ -3537,6 +3543,7 @@ maid:give(runService.Heartbeat:Connect(function()
 				Neverlose.Rage.learnServerShift(true, nil, shot.info.shiftMag)
 			end
 			Logs.push("Combat", ("hit {%s} in the %s for {%d} damage ({%d} health left)"):format(name, bodyPhrase(shot.part), drop, math.max(math.floor(health + 0.5), 0)))
+			if Neverlose.Rage and Neverlose.Rage.resolveOriginShot then Neverlose.Rage.resolveOriginShot(shot, true) end
 			pcall(HitEffects.world, shot.hitPos, false)
 			pcall(Neverlose.Vfx.hit, shot.hitPos, shot.part, false)
 			Events.fire("hit", entity, shot, drop)
@@ -3822,6 +3829,9 @@ function Rage.probeOrigin()
 		line("  allowedWalls: %d | MaxWalls setting: %s | WallMinDamage: %s",
 			Ballistics.allowedWalls(weapon, Neverlose.config.rage.autowall),
 			tostring(Neverlose.config.rage.maxWalls), tostring(Neverlose.config.rage.wallMinDamage))
+		line("  wall spot: %s | radius %.1f st | multiRay %s",
+			tostring(Neverlose.config.rage.spotFind ~= false), tonumber(Neverlose.config.rage.spotRadius) or 0.9,
+			tostring(Neverlose.config.rage.multiRay))
 	end
 
 	-- Куда смотрим: тестовый «угол» в 60 стадах по направлению камеры.
@@ -3866,6 +3876,19 @@ function Rage.probeOrigin()
 	line("  " .. table.concat(nearest, " | "))
 
 	local target = Rage.target
+	line("-- last miss --")
+	local lastMiss = Neverlose.stats and Neverlose.stats.lastMiss
+	if lastMiss then
+		line("  %s · {%s} %s · %s%s · %d wall%s · %s st · shifted %s", lastMiss.stamp or "--:--:--",
+			tostring(lastMiss.name), tostring(lastMiss.part), tostring(lastMiss.reason), tostring(lastMiss.detail or ""),
+			lastMiss.walls or 0, (lastMiss.walls or 0) == 1 and "" or "s",
+			lastMiss.distance and ("%d"):format(math.floor(lastMiss.distance + 0.5)) or "?",
+			tostring(lastMiss.shifted))
+	else
+		line("  none this session")
+	end
+	line("rage: %s | probe log: %s | last fail: %s", tostring(Neverlose.config.rage.enabled),
+		tostring(Neverlose.config.rage.originProbeLog), tostring(Rage.lastFail or "none"))
 	line("-- current target --")
 	if target and target.part and target.part.Parent then
 		local aim = Rage.aimPoint(target)
@@ -3914,6 +3937,13 @@ function Rage.probeOrigin()
 			line("  miss reason: %s x%d", reasons[index][1], reasons[index][2])
 		end
 	end
+	line("-- recent shifted shots (newest first) --")
+	local recent = Rage.originLogLines(12)
+	if #recent == 0 then
+		line("  no origin events yet")
+	else
+		for _, recentLine in ipairs(recent) do line("  " .. recentLine) end
+	end
 	line("=== END ===")
 	return table.concat(out, "\n")
 end
@@ -3936,6 +3966,175 @@ function Rage.noteProbe(hit, reason, magnitude)
 	end
 	if not hit and reason then
 		data.reasons[reason] = (data.reasons[reason] or 0) + 1
+	end
+end
+
+---Живой лог origin: отдельная запись на каждый смещённый выстрел.
+---Запись создаётся в момент выстрела и дополняется результатом (hit/miss),
+---поэтому видно не только "сколько всего", но и каждый случай отдельно.
+Rage.originLog, Rage.originLogSeq, Rage.originLogLimit = {}, 0, 40
+
+-- Короткое словесное направление сдвига (относительно камеры).
+function Rage.shiftLabel(shift)
+	if typeof(shift) ~= "Vector3" then return "?" end
+	if shift.Magnitude < 0.05 then return "0" end
+	local parts = {}
+	local camera = currentCamera and currentCamera.CFrame
+	if camera then
+		local right = shift:Dot(camera.RightVector)
+		if math.abs(right) >= 0.5 then
+			parts[#parts + 1] = (right > 0 and "right " or "left ") .. ("%.1f"):format(math.abs(right))
+		end
+		local look = camera.LookVector
+		local flat = Vector3.new(look.X, 0, look.Z)
+		if flat.Magnitude > 0.01 then
+			local forward = shift:Dot(flat.Unit)
+			if math.abs(forward) >= 0.5 then
+				parts[#parts + 1] = (forward > 0 and "fwd " or "back ") .. ("%.1f"):format(math.abs(forward))
+			end
+		end
+	end
+	if math.abs(shift.Y) >= 0.5 then
+		parts[#parts + 1] = (shift.Y > 0 and "up " or "down ") .. ("%.1f"):format(math.abs(shift.Y))
+	end
+	if #parts == 0 then return ("%.1f"):format(shift.Magnitude) end
+	return table.concat(parts, "/")
+end
+
+function Rage.originEventLine(ev)
+	local distance = ev.distance and ("%d st"):format(math.floor(ev.distance + 0.5)) or "? st"
+	local result = ev.result ~= "pending" and ev.result or "?"
+	if ev.result == "miss" and ev.reason then result = "miss (" .. tostring(ev.reason) .. ")" end
+	return ("#%d %s +%.1f %s | %s %s | %s | %d wall%s | v%.0f | %dms | %s"):format(
+		ev.id or 0, ev.stamp or "--:--:--", ev.mag or 0, ev.label or "?",
+		ev.name or "?", ev.part or "Body", distance, ev.walls or 0, (ev.walls or 0) == 1 and "" or "s",
+		ev.speed or 0, ev.ping or 0, result)
+end
+
+---Скорость цели по горизонтали: по ней видно, был ли мисс из-за движения.
+function Rage.flatSpeed(entity)
+	local velocity = (entity and Ballistics.velocity) and Ballistics.velocity(entity) or Vector3.zero
+	return math.sqrt(velocity.X * velocity.X + velocity.Z * velocity.Z)
+end
+
+---Свежие события, новые сверху. pending старше 6 секунд считаем "нет ответа".
+function Rage.originLogLines(limit)
+	local log = Rage.originLog or {}
+	local lines = {}
+	local now = os.clock()
+	for index = #log, 1, -1 do
+		local ev = log[index]
+		if ev.result == "pending" and now - (ev.at or 0) > 6 then ev.result = "no feedback" end
+		lines[#lines + 1] = Rage.originEventLine(ev)
+		if #lines >= (limit or 12) then break end
+	end
+	return lines
+end
+
+---Запись в файл: статистика + последние события. Троттлится, чтобы очередь
+---быстрых выстрелов не превращалась в запись файла каждый кадр.
+function Rage.writeOriginProbe(force)
+	if not writefile then return end
+	local now = os.clock()
+	if not force and now - (Rage.probeWriteAt or 0) < 0.1 then
+		if not Rage.probeWriteQueued then
+			Rage.probeWriteQueued = true
+			task.delay(0.12, function()
+				Rage.probeWriteQueued = false
+				Rage.writeOriginProbe(true)
+			end)
+		end
+		return
+	end
+	Rage.probeWriteAt = now
+	local lines = { "=== NEV ORIGIN LIVE LOG ===" }
+	lines[#lines + 1] = ("time: %s"):format(os.date("%Y-%m-%d %H:%M:%S"))
+	local config = Neverlose.config.rage
+	lines[#lines + 1] = ("map: %s | serverHits: %s | Range: %.1f | reach: %.1f | shiftCap: %s"):format(
+		tostring(workspaceService:GetAttribute("Map")), tostring(Game.serverHits),
+		tonumber(config.originRange) or 0, Rage.originReach(), tostring(Rage.shiftCap))
+	local data = Rage.originProbeData
+	if data and (data.hits + data.misses) > 0 then
+		local total = data.hits + data.misses
+		lines[#lines + 1] = ("hits %d | misses %d | %.0f%%"):format(data.hits, data.misses, data.hits / total * 100)
+		local keys = {}
+		for key in pairs(data.buckets) do keys[#keys + 1] = key end
+		table.sort(keys)
+		for _, key in ipairs(keys) do
+			local bucket = data.buckets[key]
+			local count = bucket.ok + bucket.fail
+			lines[#lines + 1] = ("  %.1f-%.1f st: %d/%d (%.0f%%)"):format(key, key + 0.5, bucket.ok, count, bucket.ok / count * 100)
+		end
+		local reasons = {}
+		for reason, count in pairs(data.reasons) do reasons[#reasons + 1] = { reason, count } end
+		table.sort(reasons, function(a, b) return a[2] > b[2] end)
+		for index = 1, math.min(#reasons, 6) do
+			lines[#lines + 1] = ("  miss reason: %s x%d"):format(reasons[index][1], reasons[index][2])
+		end
+	end
+	lines[#lines + 1] = "recent shifted shots (newest first):"
+	local recent = Rage.originLogLines(40)
+	if #recent == 0 then lines[#lines + 1] = "  none yet" end
+	for _, line in ipairs(recent) do lines[#lines + 1] = "  " .. line end
+	pcall(writefile, "nev_origin_probe.txt", table.concat(lines, "\n"))
+end
+
+---Вызывается при регистрации выстрела: фиксируем сдвиг и цель.
+function Rage.logOriginShot(origin, info, entity, walls)
+	local real = Game.origin()
+	local shift = (typeof(origin) == "Vector3" and typeof(real) == "Vector3") and (origin - real) or Vector3.zero
+	local ev = {
+		id = (Rage.originLogSeq or 0) + 1,
+		at = os.clock(), stamp = os.date("%H:%M:%S"),
+		name = entity and tostring(entity.DisplayName or entity.Name) or "?",
+		part = info and info.part or "Body",
+		distance = info and info.distance,
+		mag = shift.Magnitude, label = Rage.shiftLabel(shift),
+		walls = walls or 0, chance = info and info.chance, mode = info and info.mode,
+		entity = entity, from = origin,
+		speed = Rage.flatSpeed(entity), ping = Rage.pingMs and Rage.pingMs() or 0,
+		result = "pending",
+	}
+	-- Один и тот же выстрел проходит через хук и через remoteFire — второй раз
+	-- не заводим новую запись, а переиспользуем ещё не закрытую.
+	local log = Rage.originLog
+	local previous = log[#log]
+	if previous and previous.result == "pending" and ev.at - (previous.at or 0) < 0.005
+		and previous.name == ev.name and math.abs((previous.mag or 0) - ev.mag) < 0.05 then
+		previous.at, previous.part, previous.distance = ev.at, ev.part, ev.distance
+		previous.walls = math.min(previous.walls or 0, ev.walls or 0)
+		return previous
+	end
+	Rage.originLogSeq = ev.id
+	log[#log + 1] = ev
+	while #log > (Rage.originLogLimit or 40) do table.remove(log, 1) end
+	if Neverlose.config.rage.originProbeLog then
+		Logs.push("Combat", ("origin +%.1f %s · {%s} %s · %d st"):format(
+			ev.mag, ev.label, ev.name, ev.part, math.floor((ev.distance or 0) + 0.5)))
+		Rage.writeOriginProbe()
+	end
+	return ev
+end
+
+---Вызывается при попадании/промахе: дописываем результат в ту же запись.
+function Rage.resolveOriginShot(shot, hit, reason)
+	local ev = shot and shot.info and shot.info.originEvent
+	if not ev or ev.result ~= "pending" then return end
+	ev.result = hit and "hit" or "miss"
+	ev.reason = (not hit) and reason or nil
+	ev.resolvedAt = os.clock()
+	if not hit and ev.from then
+		-- Point Ban: конкретную точку, с которой не зарегистрировалось, не
+		-- используем 1.5 с. Разброс и лаг сюда не входят (см. pointBanReasons).
+		Rage.banOriginPoint(ev.entity, ev.from, reason)
+	end
+	if Neverlose.config.rage.originProbeLog then
+		if hit then
+			Logs.push("Combat", ("origin +%.1f %s · {%s} %s · hit"):format(ev.mag, ev.label, ev.name, ev.part))
+		else
+			Logs.push("Combat", ("origin +%.1f %s · {%s} %s · miss · %s"):format(ev.mag, ev.label, ev.name, ev.part, tostring(reason or "unknown")))
+		end
+		Rage.writeOriginProbe()
 	end
 end
 
@@ -4137,12 +4336,11 @@ function Rage.originShiftsFor(toward)
 	return shifts
 end
 
--- Origin scan: the zypdm | dumpf1x build's search for a clear point around the real origin, same order of candidates and checks.
--- FPS: per-character cache, long failure cache, 1.5 ms time budget per call (the scan resumes from where it stopped),
--- at most one fresh scan per scanAll (Rage.originBudget), free() is checked before the expensive lands() trace.
-local scanCaches = setmetatable({}, { __mode = "k" })
-local SCAN_BUDGET = 0.0015 -- seconds of wall time one originScan call may spend
-local SCAN_FAIL_TTL = 0.5 -- a failed scan is trusted this long while camera and target barely moved
+-- Origin scan 1:1 из zypdm | dumpf1x: кэш на 0.15 с (как originCache у них),
+-- без бюджета и курсора — скан всегда проходит весь список кандидатов.
+-- Кэш по персонажу: их originCache один общий, но у нас scanAll проверяет
+-- несколько целей за кадр, и общий кэш заставлял бы сканировать всех заново.
+local scanCache = setmetatable({}, { __mode = "k" })
 local scanParams = RaycastParams.new()
 scanParams.FilterType = Enum.RaycastFilterType.Exclude
 pcall(function() scanParams.CollisionGroup = "Bullet" end)
@@ -4175,7 +4373,53 @@ function Rage.originReachable(real, point)
 	return false
 end
 
-function Rage.originScan(character, part, range, penetration, maxWalls)
+-- Point Ban: точка сдвинутого origin, с которой был мисс по геометрии,
+-- не используется 1.5 с. Обычные промахи (разброс, лаг, движущаяся цель)
+-- точку не банят, иначе скан начал бы схлопываться, как раньше.
+Rage.pointBan = setmetatable({}, { __mode = "k" })
+Rage.pointBanReasons = {
+	["penetration"] = true, ["blocked by geometry"] = true,
+	["unregistered shot"] = true, ["direct shot not registered"] = true,
+}
+
+function Rage.banOriginPoint(entity, position, reason)
+	if not (entity and typeof(position) == "Vector3") then return end
+	-- Баним только геометрические причины. Если причина неизвестна (лаг,
+	-- разброс, движение цели) — точку не трогаем.
+	if not (reason and Rage.pointBanReasons[reason]) then return end
+	local real = Game.origin()
+	-- Свой собственный origin не баним: это не «точка», а обычный выстрел.
+	if typeof(real) == "Vector3" and (position - real).Magnitude < 1 then return end
+	local list = Rage.pointBan[entity]
+	if not list then list = {} Rage.pointBan[entity] = list end
+	local now = os.clock()
+	list[#list + 1] = { pos = position, until_ = now + 1.5 }
+	for index = #list, 1, -1 do
+		if list[index].until_ < now or #list > 12 then table.remove(list, index) end
+	end
+end
+
+function Rage.originPointBanned(entity, position)
+	if not entity then return false end
+	local list = Rage.pointBan[entity]
+	if not list then return false end
+	local now = os.clock()
+	for index = #list, 1, -1 do
+		local item = list[index]
+		if item.until_ < now then
+			table.remove(list, index)
+		elseif (item.pos - position).Magnitude < 1.0 then
+			return true
+		end
+	end
+	return false
+end
+
+-- Origin scan 1:1 из zypdm | dumpf1x: кэш на 0.15 с, сдвиг камеры < 2,
+-- тот же порядок кандидатов: from, 4 кольца × steps, вертикаль, точки вперёд/вбок.
+-- Проверки те же: clear(free) в optimized, lands в precise. Никаких
+-- originReachable/cursor/бюджета — из-за них скан схлопывался после промахов.
+function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 	if not part or not part.Parent or not character then return nil end
 	local config = Neverlose.config.rage
 	local from = Game.origin()
@@ -4184,7 +4428,7 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 	local distance = toAim.Magnitude
 	if distance < 0.5 then return nil end
 
-	local radius = Rage.originReach()
+	local radius = math.clamp(tonumber(config.originRange) or 8, 1, 16)
 	local scans = math.clamp(math.floor(tonumber(config.originScans) or 4), 1, 12)
 	local mode = config.originScanMode or "optimized"
 
@@ -4193,41 +4437,22 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 
 	local rangeValue = tonumber(range) or 500
 	local penValue = tonumber(penetration)
-	local walls = tonumber(maxWalls) or 0
 	local useLand = mode ~= "default"
 	local now = os.clock()
-	local cache = scanCaches[character]
+	local cache = scanCache[character]
 	if not cache then
-		cache = { at = 0 }
-		scanCaches[character] = cache
+		cache = { character = character, at = 0 }
+		scanCache[character] = cache
 	end
 
-	-- Cheap exits first: a recent failure for (almost) the same camera and target stays a failure.
-	local fromMoved = cache.from and (cache.from - from).Magnitude or math.huge
-	if cache.failed and not cache.pos then
-		local age = now - cache.at
-		if (age < 0.15 and fromMoved < 2)
-			or (age < SCAN_FAIL_TTL and fromMoved < 0.75 and cache.aim and (cache.aim - aim).Magnitude < 1) then
-			return nil, "cached"
-		end
+	local ignore = Ballistics.ignoreList()
+	scanParams.FilterDescendantsInstances = ignore
+	local overlap = {}
+	for index = 1, #ignore do
+		if ignore[index] then overlap[#overlap + 1] = ignore[index] end
 	end
-	local cacheOnly = (Rage.originBudget or 1) <= 0
-	local retestPos = cache.pos and fromMoved < 2 and (now - cache.at < (cacheOnly and SCAN_FAIL_TTL or 0.15))
-	if cacheOnly and not retestPos then return nil, "skipped" end
-
-	local prepared = false
-	local function prepare()
-		if prepared then return end
-		prepared = true
-		local ignore = Ballistics.ignoreList()
-		scanParams.FilterDescendantsInstances = ignore
-		local overlapIgnore = {}
-		for index = 1, #ignore do
-			if ignore[index] then overlapIgnore[#overlapIgnore + 1] = ignore[index] end
-		end
-		overlapIgnore[#overlapIgnore + 1] = character
-		scanOverlap.FilterDescendantsInstances = overlapIgnore
-	end
+	overlap[#overlap + 1] = character
+	scanOverlap.FilterDescendantsInstances = overlap
 
 	local function clear(point)
 		local delta = aim - point
@@ -4237,18 +4462,20 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 	end
 
 	local function wallsOk(count)
-		return count <= walls
+		-- 1:1 из dumpfix: в скан-луче число стен не ограничивает, если
+		-- включён autowall/wallLimit; иначе нужен чистый луч.
+		return count <= 0 or config.autowall == true or (not Game.serverHits and config.wallLimit == true)
 	end
 
 	local function lands(point)
 		local delta = aim - point
 		if delta.Magnitude < 0.05 then return true, 1 end
-		local hits, reached, count = Ballistics.trace(point, delta.Unit, rangeValue, character, walls, penValue)
+		local hits, reached, count = Ballistics.trace(point, delta.Unit, rangeValue, character, math.huge, penValue)
 		return reached == true and wallsOk(count or 0), #hits
 	end
 
 	local function free(point)
-		local parts = workspaceService:GetPartBoundsInRadius(point, 0.3, scanOverlap)
+		local parts = workspaceService:GetPartBoundsInRadius(point, 0.15, scanOverlap)
 		for index = 1, #parts do
 			local other = parts[index]
 			if other.CanCollide and other.CanQuery and other.Transparency < 0.9 and not other:IsDescendantOf(character) then
@@ -4258,45 +4485,30 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 		return true
 	end
 
-	-- Keep the shot origin from creeping right up to the target.
-	local minGap = math.min(distance, 7)
-
-	-- Same acceptance rule as before (clear+free, or lands+free); the point must be free in every branch,
-	-- so the cheap free() runs before the expensive lands() trace and only once.
 	local function test(point)
-		if point ~= from and (aim - point).Magnitude < minGap then return nil end
-		prepare()
+		if entity and Rage.originPointBanned(entity, point) then return nil end
 		if mode == "precise" then
-			if not free(point) then return nil end
 			local ok, count = lands(point)
-			return (ok and count > 0) and point or nil
+			if not (ok and count > 0) then return nil end
+			return free(point) and point or nil
 		end
-		if clear(point) then return free(point) and point or nil end
-		if useLand and free(point) then
-			local ok = lands(point)
-			if ok then return point end
+		if clear(point) and free(point) then return point end
+		if useLand then
+			if lands(point) and free(point) then return point end
 		end
 		return nil
 	end
 
-	-- The shifted origin must be walkable from the real position, not through a wall or floor.
-	local baseTest = test
-	test = function(point)
-		local result = baseTest(point)
-		if result and result ~= from and not Rage.originReachable(from, result) then return nil end
-		return result
-	end
-
-	if retestPos then
-		if test(cache.pos) then
-			cache.at = now
-			cache.aim = aim
-			return cache.pos
+	if cache.character == character and cache.from and now - cache.at < 0.15 and (cache.from - from).Magnitude < 2 then
+		if cache.position then
+			if test(cache.position) then
+				cache.at = now
+				return cache.position
+			end
+		elseif cache.failed then
+			return nil
 		end
-		if cacheOnly then return nil, "skipped" end
 	end
-
-	Rage.originBudget = (Rage.originBudget or 1) - 1
 
 	local forward = toAim.Unit
 	local side = forward:Cross(Vector3.new(0, 1, 0))
@@ -4304,79 +4516,73 @@ function Rage.originScan(character, part, range, penetration, maxWalls)
 	side = side.Unit
 	local up = side:Cross(forward).Unit
 
-	-- Candidate list in the original order (from, rings, lift, near cluster); inside a ring the sideways
-	-- directions (peek left/right) go first, then up/down, then the diagonals.
-	local list = { from }
-	local rings = { 0.35, 0.6, 0.8, 1 }
-	local steps = math.max(scans, 8)
-	local order, used = {}, {}
-	for _, step in ipairs({ 0, steps // 2, steps // 4, (steps * 3) // 4 }) do
-		if not used[step] then used[step] = true order[#order + 1] = step end
+	-- Bridge Filter: сначала ищем точку, до которой от реального origin нет
+	-- стены (сервер такие принимает стабильнее). Если таких нет — отдаём
+	-- первую найденную, чтобы скан не выключался в углу/коридоре.
+	local firstFound
+	local function prefer(point)
+		if not point then return nil end
+		if Rage.originReachable(from, point) then return point end
+		firstFound = firstFound or point
+		return nil
 	end
-	for step = 0, steps - 1 do
-		if not used[step] then used[step] = true order[#order + 1] = step end
-	end
-	for ringIndex = 1, #rings do
-		local ringRadius = math.max(radius * rings[ringIndex], 1)
-		for _, step in ipairs(order) do
-			local angle = (step / steps) * 2 * math.pi
-			list[#list + 1] = from + (side * math.cos(angle) + up * math.sin(angle)) * ringRadius
+
+	local found = prefer(test(from))
+	if not found then
+		local rings = { 0.35, 0.6, 0.8, 1 }
+		local steps = math.max(scans, 8)
+		for ringIndex = 1, #rings do
+			local ringRadius = math.max(radius * rings[ringIndex], 1)
+			for step = 0, steps - 1 do
+				local angle = (step / steps) * 2 * math.pi
+				local candidate = prefer(test(from + (side * math.cos(angle) + up * math.sin(angle)) * ringRadius))
+				if candidate then found = candidate break end
+			end
+			if found then break end
 		end
 	end
-	local lift = math.min(radius * 0.5, 2.5)
-	list[#list + 1] = from + Vector3.new(0, lift, 0)
-	list[#list + 1] = from - Vector3.new(0, lift, 0)
-	-- High and sideways reach: over cover and around corners, for an enemy that hides behind his own shift.
-	local sky = Vector3.new(0, 1, 0)
-	list[#list + 1] = from + sky * radius * 0.6
-	list[#list + 1] = from + sky * radius
-	list[#list + 1] = from + sky * radius * 0.6 + side * radius * 0.6
-	list[#list + 1] = from + sky * radius * 0.6 - side * radius * 0.6
-	list[#list + 1] = from + side * radius
-	list[#list + 1] = from - side * radius
-	list[#list + 1] = from + sky * radius * 0.35 + side * radius
-	list[#list + 1] = from + sky * radius * 0.35 - side * radius
-	local near = math.max(radius * 0.24, 1.5)
-	local mid = math.max(radius * 0.36, 2.5)
-	local far = math.max(radius * 0.5, 3.5)
-	list[#list + 1] = from + forward * near
-	list[#list + 1] = from + forward * near + side * mid
-	list[#list + 1] = from + forward * near - side * mid
-	list[#list + 1] = from + forward * mid + side * near
-	list[#list + 1] = from + forward * mid - side * near
-	list[#list + 1] = from + forward * mid
-	list[#list + 1] = from + side * far
-	list[#list + 1] = from - side * far
-	list[#list + 1] = from + forward * far
 
-	-- Resume an interrupted scan of the same target instead of restarting from candidate 1.
-	local startIndex = 1
-	if cache.cursor and cache.cursorFrom and now - (cache.cursorAt or 0) < 0.35 and (cache.cursorFrom - from).Magnitude < 1 then
-		startIndex = math.min(cache.cursor, #list)
+	if not found then
+		local lift = math.min(radius * 0.5, 2.5)
+		found = prefer(test(from + Vector3.new(0, lift, 0))) or prefer(test(from - Vector3.new(0, lift, 0)))
 	end
-	cache.cursor = nil
 
-	local deadline = now + SCAN_BUDGET
-	local found
-	local index = startIndex
-	local visited = 0
-	while visited < #list do
-		found = test(list[index])
-		if found then break end
-		visited += 1
-		index = index % #list + 1
-		if visited < #list and os.clock() > deadline then
-			cache.cursor, cache.cursorAt, cache.cursorFrom = index, os.clock(), from
-			cache.from, cache.aim, cache.pos, cache.failed = from, aim, nil, false
-			cache.at = os.clock()
-			return nil, "partial"
+	if not found then
+		local near = math.max(radius * 0.3, 1.5)
+		local mid = math.max(radius * 0.45, 2.5)
+		local far = math.max(radius * 0.6, 3.5)
+		local points = {
+			from + forward * near,
+			from + forward * near + side * mid,
+			from + forward * near - side * mid,
+			from + forward * mid + side * near,
+			from + forward * mid - side * near,
+			from + forward * mid,
+			from + side * far,
+			from - side * far,
+			from + forward * far,
+			-- Дальше вбок и вперёд: обход угла в коридоре, когда ближние
+			-- кольца упираются в стены с обеих сторон.
+			from + side * far + forward * near,
+			from - side * far + forward * near,
+			from + forward * far * 1.35,
+			from + forward * far * 1.35 + side * mid,
+			from + forward * far * 1.35 - side * mid,
+			from + side * far * 1.35,
+			from - side * far * 1.35,
+		}
+		for index = 1, #points do
+			local candidate = prefer(test(points[index]))
+			if candidate then found = candidate break end
 		end
 	end
+
+	found = found or firstFound
 
 	if found then
-		cache.at, cache.from, cache.aim, cache.pos, cache.failed = os.clock(), from, aim, found, false
+		cache.character, cache.at, cache.from, cache.position, cache.failed = character, os.clock(), from, found, false
 	else
-		cache.at, cache.from, cache.aim, cache.pos, cache.failed = os.clock(), from, aim, nil, true
+		cache.character, cache.at, cache.from, cache.position, cache.failed = character, os.clock(), from, nil, true
 	end
 	return found
 end
@@ -4865,28 +5071,29 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 	local minDamage = Rage.minDamage()
 	local validOrigins, validShifts = {}, {}
 	Ballistics.safe = true
-	Rage.originBudget = 1
 	originParams.FilterDescendantsInstances = Ballistics.ignoreList()
 	local activeOrigins = validOrigins
 	Rage.originRank = Rage.originRank or {}
 
-	local function evaluate(entity, character, part, position, record)
-		local offset = position - origin
+	local function evaluate(entity, character, part, position, record, fromOrigin)
+		local source = fromOrigin or origin
+		local offset = position - source
 		local distance = offset.Magnitude
 		if distance > range then return nil end
 
 		local pixels = screenDistance(position)
 		if fovPixels ~= math.huge and (not pixels or pixels > fovPixels) then return nil end
 
-		local usedOrigin, penalty
-		local _, reached, walls, wallPenalty = Ballistics.trace(origin, offset.Unit, distance + 2, character, maxWalls)
-		penalty = wallPenalty
+		local usedOrigin, cost
+		local _, reached, walls, wallCost = Ballistics.trace(source, offset.Unit, distance + 2, character, maxWalls)
+		cost = wallCost or 0
 		if #activeOrigins > 0 and not record and (not reached or walls > 0) then
 			for _, from in ipairs(activeOrigins) do
 				local line = position - from
-				local _, reachedFrom, wallsFrom, penaltyFrom = Ballistics.trace(from, line.Unit, line.Magnitude + 2, character, maxWalls)
-				if reachedFrom and wallsFrom <= maxWalls and (not reached or wallsFrom < walls) then
-					reached, walls, usedOrigin, penalty = true, wallsFrom, from, penaltyFrom
+				local _, reachedFrom, wallsFrom, costFrom = Ballistics.trace(from, line.Unit, line.Magnitude + 2, character, maxWalls)
+				if reachedFrom and wallsFrom <= maxWalls and (not reached or wallsFrom < walls
+					or (wallsFrom == walls and (costFrom or 0) < (cost or 0) - 0.05)) then
+					reached, walls, usedOrigin, cost = true, wallsFrom, from, costFrom or 0
 					if wallsFrom == 0 then break end
 				end
 			end
@@ -4896,7 +5103,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 		if reached and walls == 0 and not record then
 			local inward = part.Position - position
 			if inward.Magnitude > 0.25 then
-				local from = usedOrigin or origin
+				local from = usedOrigin or source
 				local inner = position + inward.Unit * 0.2
 				local line = inner - from
 				local _, innerReached = Ballistics.trace(from, line.Unit, line.Magnitude + 2, character, maxWalls)
@@ -4918,6 +5125,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 			entity = entity, character = character, part = part, position = position, origin = usedOrigin,
 			offset = record and nil or (position - part.Position),
 			damage = damage, walls = walls, record = record, distance = distance, health = health, pixels = pixels,
+			cost = cost or 0,
 			chance = Ballistics.hitChance(spread, distance, part.Size.Magnitude / 3) ,
 		}
 	end
@@ -4957,11 +5165,12 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 						local direct = aimPart.Position - origin
 						local blocked = true
 						if direct.Magnitude > 0.05 then
-							local _, directReached, directWalls = Ballistics.trace(origin, direct.Unit, direct.Magnitude + 2, character, maxWalls)
-							blocked = (not directReached) or (directWalls or 0) > 0
+							local _, directReached = Ballistics.trace(origin, direct.Unit, direct.Magnitude + 2, character, maxWalls)
+							blocked = not directReached
 						end
-						if blocked and direct.Magnitude < 250 then
-							local found, why = Rage.originScan(character, aimPart, range, nil, maxWalls)
+						-- dumpfix: скан запускается только когда прямой луч не дошёл.
+						if blocked then
+							local found, why = Rage.originScan(character, aimPart, range, nil, maxWalls, entity)
 							if found then
 								activeOrigins[1] = found
 								Rage.originRank[entity] = {
@@ -4998,7 +5207,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 				for _, name in ipairs(partNames) do
 					local part = not (forceBody and PART_GROUP[name] == "Head") and character:FindFirstChild(name) or nil
 					if part then
-						for _, point in ipairs(Ballistics.points(part, multipointSet[name] == true)) do
+						for _, point in ipairs(Ballistics.points(part, multipointSet[name] == true, config.multipointCount)) do
 							if keep(evaluate(entity, character, part, point, nil)) then break end
 						end
 					end
@@ -5026,6 +5235,94 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 					if bestHead.damage >= chosen.damage and bestHead.chance >= Rage.requiredChance(weapon, bestHead, config) * 0.6 and (bestHead.walls or 0) <= (chosen.walls or 0) then chosen = bestHead end
 				end
 
+				-- Multi-ray autowall: прямой и смещённые origin-лучи уже проверены.
+				-- Если выбранная точка всё ещё за стеной (или не нашлось ничего),
+				-- пробуем несколько точек в пределах хитбокса и берём ту, где
+				-- меньше стен. Multi Ray = сколько лучей всего (1..10).
+				local multiRays = math.clamp(math.floor(tonumber(config.multiRay) or 1), 1, 10)
+				if multiRays > 1 and (config.autowall or config.wallLimit) then
+					local seedRecord = chosen and chosen.record or nil
+					local seedPart = chosen and chosen.part or character:FindFirstChild(partNames[1])
+					local seedPoint = chosen and chosen.position or (seedPart and seedPart.Position)
+					if seedPart and seedPart.Parent and seedPoint and not seedRecord
+						and (not chosen or (chosen.walls or 0) > 0) then
+						local line = seedPoint - origin
+						if line.Magnitude > 0.05 then
+							local dir = line.Unit
+							local side = dir:Cross(Vector3.new(0, 1, 0))
+							if side.Magnitude < 0.01 then side = dir:Cross(Vector3.new(1, 0, 0)) end
+							side = side.Unit
+							local up = side:Cross(dir).Unit
+							local smallest = math.min(seedPart.Size.X, seedPart.Size.Y, seedPart.Size.Z)
+							-- Wall Spot: радиус задаётся настройкой, но точка обязана
+							-- остаться на цели — иначе сервер просто не засчитает попадание.
+							local wanted = tonumber(config.spotRadius) or 0.6
+							local radius = math.clamp(wanted, 0.05, smallest * 0.35)
+							-- Два кольца: внутреннее ловит узкие окна, внешнее — края хитбокса.
+							-- При включённом Wall Spot всегда не меньше 4 точек, даже если
+							-- Multi Ray стоит 1–3: иначе «поиск» ничего не находит.
+							local rings = (config.spotFind ~= false) and 2 or 1
+							local total = math.max(multiRays - 1, (config.spotFind ~= false) and 4 or 1)
+							local perRing = math.max(1, math.ceil(total / rings))
+							local best = chosen
+							for ring = 1, rings do
+								local scale = ring / rings
+								for ray = 1, perRing do
+									local angle = ((ray - 1) / perRing) * math.pi * 2 + (ring == 2 and 0.5 / perRing * math.pi * 2 or 0)
+									local point = seedPoint + (side * math.cos(angle) + up * math.sin(angle)) * (radius * scale)
+									local other = evaluate(entity, character, seedPart, point, nil)
+									if other and (not best or (other.walls or 0) < (best.walls or 0)
+										or ((other.walls or 0) == (best.walls or 0) and (other.cost or 0) < (best.cost or 0) - 0.05)
+										or ((other.walls or 0) == (best.walls or 0)
+											and math.abs((other.cost or 0) - (best.cost or 0)) <= 0.05
+											and other.damage > best.damage)) then
+										best = other
+										if (best.walls or 0) <= 0 then break end
+									end
+								end
+								if best and (best.walls or 0) <= 0 then break end
+							end
+							chosen = best
+						end
+					end
+				end
+
+				-- Wall Spot (слайд origin): если точка всё ещё за стеной, двигаем
+				-- сам origin вбок/вверх на 0.2–2 стада вдоль стены. Это ищет
+				-- тонкое место или щель, не трогая точку прицела.
+				if config.spotFind ~= false and (config.autowall or config.wallLimit) and chosen
+					and (chosen.walls or 0) > 0 and (chosen.cost or 0) >= 0.5 and not chosen.record then
+					local slidePart, slidePoint = chosen.part, chosen.position
+					if slidePart and slidePart.Parent and slidePoint then
+						local line = slidePoint - origin
+						if line.Magnitude > 0.5 then
+							local dir = line.Unit
+							local side = dir:Cross(Vector3.new(0, 1, 0))
+							if side.Magnitude < 0.01 then side = dir:Cross(Vector3.new(1, 0, 0)) end
+							side = side.Unit
+							local up = side:Cross(dir).Unit
+							local slide = math.clamp(tonumber(config.spotRadius) or 0.6, 0.2, 1.2)
+							local best = chosen
+							local function slideTo(from)
+								if not Rage.originClear(from) then return end
+								local other = evaluate(entity, character, slidePart, slidePoint, nil, from)
+								if not other then return end
+								-- Слайд должен реально стрелять из новой точки, иначе он бесполезен.
+								if not other.origin then other.origin = from end
+								if (other.walls or 0) < (best.walls or 0)
+									or ((other.walls or 0) == (best.walls or 0) and (other.cost or 0) < (best.cost or 0) - 0.05) then
+									best = other
+								end
+							end
+							slideTo(origin + side * slide)
+							slideTo(origin - side * slide)
+							slideTo(origin + up * slide * 0.7)
+							slideTo(origin - up * slide * 0.7)
+							chosen = best
+						end
+					end
+				end
+
 				if chosen then
 					local score
 					if config.target == "Highest Damage" then
@@ -5047,7 +5344,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 					-- Пробитие — запасной вариант, но не абсолютно последний:
 					-- смертельный выстрел через стену должен перебивать
 					-- царапину по открытой цели, иначе автоволл бесполезен.
-					if (chosen.walls or 0) > 0 then score += 100000 end
+					if (chosen.walls or 0) > 0 then score += 100000 + (chosen.cost or 0) * 5 end
 					if config.stickyTarget and Rage.stickyEntity == entity and os.clock() - (Rage.stickyAt or 0) < 0.5 then score -= 1e6 end
 					chosen.score = score
 					results[#results + 1] = chosen
@@ -5139,7 +5436,7 @@ function Rage.aimBullet(bullet, target, weapon)
 		local relaxed = false
 		-- The predicted point may sit just outside the rig we see; the server decides the hit, so a clear line is enough.
 		if not reached and predicted and Game.serverHits then
-			local _, _, blockers = Ballistics.traceLocal(from, direction, distance, nil, 0)
+			local _, _, blockers = Ballistics.traceRaw(from, direction, distance, nil, 0)
 			if blockers == 0 then reached, walls, relaxed = true, 0, true end
 		end
 		Ballistics.safe = false
@@ -5163,13 +5460,9 @@ function Rage.aimBullet(bullet, target, weapon)
 	-- просто отменялся, и получалось "линия нарисована, пули нет".
 	local function find()
 		local found = attempt(requested)
-		-- Origin мог устареть (игрок сдвинулся с момента скана): снова проверяем
-		-- путь от текущей реальной позиции и отсутствие стен до точки.
+		-- dumpfix не требует «дойти» до смещённой точки: сдвиг нужен как раз
+		-- тогда, когда прямой путь перекрыт, иначе смысл скана теряется.
 		local shiftedOrigin = target.origin
-		if shiftedOrigin and not Rage.originReachable(real, shiftedOrigin) then shiftedOrigin = nil end
-		if requested ~= real and not Rage.originReachable(real, requested) then
-			found = nil
-		end
 		if shiftedOrigin then
 			local shifted = attempt(shiftedOrigin)
 			if shifted and (not found or not found.reached or (shifted.walls or 0) < (found.walls or 0)) then
@@ -5491,18 +5784,97 @@ maid:give(runService.Heartbeat:Connect(function()
 	end
 end))
 
+---Автопрофили под оружие: каждому стволу свои Range/Scans/Multi Ray/Spot/
+---Min Damage. Настраивать вручную не нужно — при смене оружия значения
+---применяются сами, а профиль запоминается в конфиге по имени/Identifier.
+function Rage.weaponProfileFor(weapon)
+	local config = Neverlose.config.rage
+	local profiles = config.weaponProfiles
+	if type(profiles) ~= "table" then profiles = {} config.weaponProfiles = profiles end
+	local key = weapon and (weapon.Identifier or weapon.Name)
+	if type(key) ~= "string" or key == "" then return nil end
+	local profile = profiles[key]
+	if profile then return profile, key end
+
+	local properties = weapon.Properties or {}
+	local perPart = properties.DamagePerPart
+	local head = type(perPart) == "table" and tonumber(perPart.Head) or nil
+	local body = type(perPart) == "table" and tonumber(perPart.Torso) or nil
+	local damage = head or body or tonumber(properties.Damage) or 20
+	local bullets = tonumber(properties.BulletsPerShot) or 1
+	local pen = tonumber(properties.Penetration) or 0
+	local rate = tonumber(properties.FireRate) or 0.1
+
+	-- Базовый профиль — винтовка.
+	profile = { originRange = 7, originScans = 4, multiRay = 4, spotRadius = 0.55, minDamage = 15, wallMinDamage = 20, maxWalls = 2 }
+	if bullets > 1 then
+		-- Дробовик: за стену почти не стреляем, скан короткий.
+		profile = { originRange = 5, originScans = 3, multiRay = 3, spotRadius = 0.5, minDamage = 10, wallMinDamage = 0, maxWalls = 1 }
+	elseif damage >= 55 or rate >= 0.5 then
+		-- Снайперка/AWP: длинный скан, толстые стены, высокий порог урона.
+		profile = { originRange = 9, originScans = 6, multiRay = 6, spotRadius = 0.6, minDamage = 30, wallMinDamage = 40, maxWalls = 3 }
+	elseif damage < 22 or pen < 0.35 then
+		-- Пистолет / слабое пробитие: лучше стрелять в открытую, чем в стену.
+		profile = { originRange = 5, originScans = 3, multiRay = 3, spotRadius = 0.5, minDamage = 10, wallMinDamage = 0, maxWalls = 1 }
+	end
+	profiles[key] = profile
+	return profile, key
+end
+
+-- Поля, которые игрок трогал руками. Автопрофиль их больше не перезаписывает:
+-- один раз поправил — значение остаётся твоим. Список живёт в конфиге, чтобы
+-- переживать рестарт.
+Rage.manual = Rage.manual or {}
+
+function Rage.applyWeaponProfile(weapon)
+	local config = Neverlose.config.rage
+	if config.weaponProfilesOn == false then Rage.profileKey = nil return end
+	if not weapon then return end
+	local key = weapon.Identifier or weapon.Name
+	if type(key) ~= "string" or key == "" or key == Rage.profileKey then return end
+	local profile = Rage.weaponProfileFor(weapon)
+	if not profile then return end
+	Rage.profileKey = key
+	local manual = config.manualFields
+	if type(manual) ~= "table" then manual = {} config.manualFields = manual end
+	local changed = false
+	for name, value in pairs(profile) do
+		if not manual[name] and config[name] ~= value then
+			config[name] = value
+			changed = true
+		end
+	end
+	if changed then
+		Logs.push("Combat", ("weapon profile · {%s} · Range %s · Min Damage %s · Multi Ray %s"):format(
+			tostring(weapon.Name or key), tostring(profile.originRange), tostring(profile.minDamage), tostring(profile.multiRay)))
+	end
+end
+
+-- Автопрофиль работает даже при выключенном рейдже: значения в меню и в
+-- Probe Report всегда соответствуют текущему оружию, а не старому конфигу.
+maid:give(runService.Heartbeat:Connect(function()
+	if os.clock() - (Rage.profileCheckAt or 0) < 0.5 then return end
+	Rage.profileCheckAt = os.clock()
+	local weapon = Game.weapon()
+	if weapon then pcall(Rage.applyWeaponProfile, weapon) end
+end))
+
 function Rage.refresh(weapon, config)
+	if weapon then pcall(Rage.applyWeaponProfile, weapon) end
 	local now = os.clock()
 
 	local scanMs = (Neverlose.stats or {}).scanMs or 99
 	local fast = config.scanMode == "Performance"
-	local interval
-	if #Rage.targets == 0 then
-		interval = (not fast and scanMs < 2.5) and 1 / 60 or 1 / (fast and 30 or 45)
-	else
-		interval = (not fast and scanMs < 2.5) and 1 / 60 or 1 / math.max(fast and math.min(config.scanHz, 40) or config.scanHz, 1)
-	end
-	if scanMs > 4 then interval = math.max(interval, scanMs * 6 / 1000) end
+	-- Scan Rate теперь до 240 Гц. Performance режет герцаж (CPU), Balanced даёт
+	-- полный — сама математика скана от режима не меняется.
+	local rate = math.clamp(tonumber(config.scanHz) or 30, 1, 240)
+	if fast then rate = math.min(rate, 60) end
+	local interval = 1 / rate
+	-- Защита кадра: скан не должен съедать больше ~60% кадра. Если рейкасты
+	-- дорогие, частота сама опустится до реально возможной.
+	if scanMs > 0.4 then interval = math.max(interval, scanMs * 0.6 / 1000) end
+	-- Нет целей в поле — 240 Гц не нужны, хватает 90.
+	if not Rage.targets or #Rage.targets == 0 then interval = math.max(interval, 1 / math.min(rate, 90)) end
 	if now - Rage.lastScan >= interval then
 		Rage.lastScan = now
 		local scanStart = os.clock()
@@ -5808,6 +6180,87 @@ maid:give(runService.Heartbeat:Connect(function()
 		warn("[Neverlose] ragebot error: " .. tostring(err))
 	end
 end))
+
+-- Multipoint Visual: неоновые точки на хитбоксах цели, видны сквозь стены.
+-- Рисуются ровно по тем точкам, по которым рейдж реально проверяет пробитие,
+-- поэтому включённый визуал = честная картинка того, куда он стреляет.
+do
+	local marks, shown = {}, 0
+	local glows, glowsShown = {}, 0
+	local function mark(index)
+		local adorn = marks[index]
+		if not adorn then
+			adorn = newInstance("SphereHandleAdornment", {
+				Name = randomName(), AlwaysOnTop = true, ZIndex = 3,
+				Transparency = 0.3, Radius = 0.1,
+			}, effectsFolder)
+			marks[index] = adorn
+		end
+		return adorn
+	end
+	local function glow(index)
+		local highlight = glows[index]
+		if not highlight then
+			highlight = newInstance("Highlight", {
+				Name = randomName(), DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+			}, effectsFolder)
+			glows[index] = highlight
+		end
+		return highlight
+	end
+	maid:give(runService.RenderStepped:Connect(function()
+		local config = Neverlose.config.rage
+		local color = config.multipointColor
+		local used, lit = 0, 0
+		if config.multipointVisual ~= false and typeof(color) == "Color3" then
+			local count = math.clamp(math.floor(tonumber(config.multipointCount) or 0), 0, 10)
+			local names = hitboxParts(config.multipointList, config.multipoint, true)
+			local targets = Rage.targets or {}
+			for index = 1, math.min(#targets, 4) do
+				local entry = targets[index]
+				local character = entry and entry.character
+				if character and character.Parent then
+					-- Неоновый контур цели сквозь стены, тот же цвет.
+					lit += 1
+					local highlight = glow(lit)
+					highlight.Adornee = character
+					highlight.FillColor = color
+					highlight.OutlineColor = color
+					highlight.FillTransparency = 0.88
+					highlight.OutlineTransparency = 0.12
+					highlight.Enabled = true
+					for _, name in ipairs(names) do
+						local part = character:FindFirstChild(name)
+						if part then
+							for _, point in ipairs(Ballistics.points(part, true, count)) do
+								used += 1
+								local adorn = mark(used)
+								local ok, localCf = pcall(function() return part.CFrame:ToObjectSpace(CFrame.new(point)) end)
+								if ok then
+									adorn.Adornee = part
+									adorn.CFrame = localCf
+									adorn.Color3 = color
+									adorn.Visible = true
+								else
+									used -= 1
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+		for index = used + 1, shown do
+			local adorn = marks[index]
+			if adorn then adorn.Visible = false end
+		end
+		for index = lit + 1, glowsShown do
+			local highlight = glows[index]
+			if highlight then highlight.Enabled = false end
+		end
+		shown, glowsShown = used, lit
+	end))
+end
 
 Events.on("shot", function()
 	if Neverlose.config.rage.quickPeek and Neverlose.config.rage.peekReturn == "Shot" and Rage.peekOrigin then
@@ -7076,6 +7529,11 @@ end
 
 do
 local EspObject = {}
+
+-- ESP visibility 1:1 из zypdm | dumpf1x: один луч камера -> голова, кэш 0.12 с,
+-- в фильтре только свой персонаж и камера.
+local visParams = RaycastParams.new()
+visParams.FilterType = Enum.RaycastFilterType.Exclude
 EspObject.__index = EspObject
 
 local FILL_STRIPS = 24
@@ -7415,7 +7873,7 @@ function EspObject:drawGhost(character, record, chams)
 end
 
 function EspObject:hideGhost(only)
-	for _, key in ipairs({ "ghost", "wallGhost" }) do
+	for _, key in ipairs({ "ghost", "wallGhost", "realGhost" }) do
 		local ghost = (not only or only == key) and self[key]
 		if ghost then
 			ghost.light.Enabled = false
@@ -7441,6 +7899,8 @@ function EspObject:hideDrawings()
 	end
 	pcall(function() self.billboard.Enabled = false end)
 	self:hideGhost("ghost")
+	self:hideGhost("realGhost")
+	self:hideGhost("realGhost")
 end
 
 function EspObject:hide()
@@ -8921,23 +9381,29 @@ function EspObject:update(delta)
 	if not espOn then return self:hideDrawings() end
 
 	local boxColor, nameColor, skeletonColor, fillColor, snapColor = colors.box, colors.name, colors.skeleton, colors.fill, colors.snapline
-	if config.visCheck then
-		if os.clock() - self.visibleAt > 0.1 then
+	-- Visibility 1:1 из zypdm | dumpf1x: один луч камера -> голова, кэш 0.12 с.
+	-- Визуал неверлузовский: плавный переход hiddenColor -> visibleColor.
+	local tint
+	if config.visCheck and isEnemy then
+		if ghostAge then
+			self.visible = false
+		elseif os.clock() - self.visibleAt > 0.12 then
 			self.visibleAt = os.clock()
-			-- A target is "visible" when any core part can be seen, not only the head.
 			local eye = currentCamera.CFrame.Position
-			local first = (head and head.Position) or root.Position
-			local chest = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
-			local seen = not blockedBetween(eye, first)
-			if not seen and chest then seen = not blockedBetween(eye, chest.Position) end
-			self.visible = seen
+			local point = (head or root).Position
+			local filter = { currentCamera }
+			local body = localPlayer.Character
+			if body then filter[#filter + 1] = body end
+			visParams.FilterDescendantsInstances = filter
+			local hit = workspaceService:Raycast(eye, point - eye, visParams)
+			self.visible = hit == nil or hit.Instance:IsDescendantOf(character)
 		end
 		-- Blend between hidden and visible instead of snapping, so peeking in
 		-- and out of cover reads as a fade rather than a flicker.
 		local goal = self.visible and 1 or 0
 		self.visMix = self.visMix or goal
 		self.visMix = self.visMix + (goal - self.visMix) * math.clamp((delta or 0.016) * 10, 0, 1)
-		local tint = config.hiddenColor:Lerp(config.visibleColor, self.visMix)
+		tint = config.hiddenColor:Lerp(config.visibleColor, self.visMix)
 		boxColor, nameColor, skeletonColor, fillColor, snapColor = tint, tint, tint, tint, tint
 	end
 
@@ -9129,9 +9595,10 @@ function EspObject:update(delta)
 		self:haloHide("snap")
 	end
 	-- Where the server most likely has him right now: the replicated rig lags by half the ping plus interpolation.
-	self.realPos.Visible = false
+	-- Real Position: неоновая копия врага там, где сервер, скорее всего, держит его сейчас.
+	-- Сдвиг тот же, что у ragebot (predictOffset) или оценка по скорости и пингу; сглажен по времени.
+	local realRecord
 	if config.realPos and isEnemy and not ghostAge and root then
-		-- Same extrapolation the ragebot aims with; below the ping threshold the old estimate stays.
 		local shift = Vector3.zero
 		local okPredict, offset, moving, gated = pcall(Rage.predictOffset, self.entity, character, root.Position, false)
 		if okPredict and gated then
@@ -9142,22 +9609,25 @@ function EspObject:update(delta)
 			local flat = Vector3.new(velocity.X, 0, velocity.Z)
 			if flat.Magnitude > 2 then shift = flat * ahead end
 		end
-		-- The estimate refreshes in steps; easing the offset (not the position) keeps the ring glued to the rig without popping.
 		local eased = self.realShift
 		eased = eased and eased:Lerp(shift, math.clamp((delta or 0.016) * 14, 0, 1)) or shift
 		self.realShift = eased
 		if eased.Magnitude > 0.1 then
-			local point, onScreen = currentCamera:WorldToViewportPoint(root.Position + eased)
-			if onScreen and point.Z > 0 then
-				self.realPos.Position = fixPoint(point)
-				self.realPos.Radius = math.clamp(height * 0.08, 4, 22)
-				self.realPos.Color = config.realPosColor
-				self.realPos.ZIndex = 2
-				self.realPos.Visible = true
+			realRecord = { cframes = {} }
+			for _, name in ipairs(BODY_PARTS) do
+				local live = character:FindFirstChild(name)
+				if live and live:IsA("BasePart") then
+					realRecord.cframes[name] = live.CFrame + eased
+				end
 			end
 		end
 	else
 		self.realShift = nil
+	end
+	if realRecord then
+		self:drawGhost(character, realRecord, { mode = "Glow", color = config.realPosColor, slot = "realGhost" })
+	else
+		self:hideGhost("realGhost")
 	end
 	self.headDot.Visible = item(team, "Main/Head Dot") and head ~= nil
 	if self.headDot.Visible then
@@ -9655,6 +10125,14 @@ do
 		return classify(name ~= "" and name or class)
 	end
 
+	-- Один и тот же шаг приходит двумя путями (remote FloorSounds и сам Sound
+	-- в персонаже), поэтому для склейки дублей считаем Step/Footstep/Jump/Landing
+	-- одним видом.
+	local function soundFamily(name)
+		if name == "Step" or name == "Footstep" or name == "Jump" or name == "Landing" then return "Footsteps" end
+		return name
+	end
+
 	-- Donor logic: only players that are alive but not streamed into Workspace can be the source of a sound we cannot see.
 	local function culledEnemies()
 		local list = {}
@@ -9884,15 +10362,20 @@ do
 		local shotFlag = isShot == true or (isShot == nil and label == "Shot")
 		local ground = groundPoint(position, label)
 
-		-- Sounds within 16 studs of an existing marker move that marker instead of making a new one.
-		local marker, markerGap
+		-- Каждый звук — своя метка. Раньше звук в пределах 16 стадов
+		-- переиспользовал чужую метку: старый круг пропадал и «тянулся»
+		-- к новому источнику. Теперь склеиваем только настоящий дубль
+		-- одного события (remote + сам Sound в пределах кадра).
+		local marker
 		for _, existing in ipairs(markers) do
 			local gap = existing.raw and (existing.raw - position).Magnitude or math.huge
-			if gap < 16 and (not markerGap or gap < markerGap) then marker, markerGap = existing, gap end
+			local sameKind = soundFamily(existing.label) == soundFamily(label)
+				and (owner == nil or existing.owner == nil or existing.owner == owner)
+			if sameKind and gap < 1.5 and now - existing.last < 0.12 then marker = existing break end
 		end
 
 		if not marker then
-			if #markers >= 14 then killMarker(table.remove(markers, 1)) end
+			if #markers >= 20 then killMarker(table.remove(markers, 1)) end
 			local ring = newLines()
 			local text = NewDrawing("Text")
 			text.Size, text.Center, text.Outline, text.Font, text.Visible = 12, true, true, 2, false
@@ -9912,6 +10395,7 @@ do
 		marker.wasShot = shotFlag
 		marker.raw, marker.last = position, now
 		marker.label = label
+		marker.owner = owner or marker.owner
 		marker.t = now
 		marker.base, marker.position = ground, ground
 		marker.drop = math.clamp(position.Y - ground.Y, 0, 8)
@@ -16116,7 +16600,15 @@ end
 Neverlose.cbTags = setmetatable({}, { __mode = "k" })
 
 function set(tbl, key)
-	local callback = function(value) tbl[key] = value end
+	local callback = function(value)
+		tbl[key] = value
+		-- Ручная правка рейджевого слайдера: автопрофиль больше это поле не трогает.
+		if tbl == Neverlose.config.rage then
+			local manual = tbl.manualFields
+			if type(manual) ~= "table" then manual = {} tbl.manualFields = manual end
+			manual[key] = true
+		end
+	end
 	Neverlose.cbTags[callback] = { tbl = tbl, key = key }
 	return callback
 end
@@ -16519,7 +17011,7 @@ function Menu.visuals(window, hk)
 	soundSettings:AddColorpicker("Neon Color", esp.soundNeonColor, setColor(esp, "soundNeonColor"))
 	soundSettings:AddSlider("Neon Power", 0, 100, esp.soundNeonPower, set(esp, "soundNeonPower"), "%")
 	soundSettings:AddSlider("Neon Size", 1, 100, esp.soundNeonSize, set(esp, "soundNeonSize"), "%")
-	tip(enemy:AddToggleColorpicker("Real Position", esp.realPos, esp.realPosColor, set(esp, "realPos"), setColor(esp, "realPosColor")), "Ring where the server most likely has a moving enemy now (replicated position plus ping lead)")
+	tip(enemy:AddToggleColorpicker("Real Position", esp.realPos, esp.realPosColor, set(esp, "realPos"), setColor(esp, "realPosColor")), "Neon copy of the enemy where the server most likely has him now (replicated position plus ping lead)")
 	local lastSeen = enemy:AddToggleColorpicker("Last Seen", esp.lastSeen, esp.lastSeenColor, set(esp, "lastSeen"), setColor(esp, "lastSeenColor"))
 	tip(lastSeen, "Afterimage of an enemy where you saw him last (and where he was heard), with the time since")
 	local lastSeenSettings = lastSeen:AddSettings()
@@ -17527,7 +18019,7 @@ function Menu.aimbot(window, hk)
 	local RageSettings = RageToggle:AddSettings()
 	if rage.priority ~= "Health" then rage.priority = "Distance" end
 	RageSettings:AddDropdown("Priority", { "Distance", "Health" }, rage.priority, set(rage, "priority"))
-	RageSettings:AddSlider("Scan Rate", 5, 60, rage.scanHz, set(rage, "scanHz"), " Hz")
+	RageSettings:AddSlider("Scan Rate", 5, 240, rage.scanHz, set(rage, "scanHz"), " Hz")
 	RageSettings:AddDropdown("Scan Mode", { "Balanced", "Performance" }, rage.scanMode or "Balanced", set(rage, "scanMode"))
 	RageSettings:AddToggle("Sticky Target", rage.stickyTarget, set(rage, "stickyTarget"))
 	RageSettings:AddSlider("Max Distance", 0, 500, rage.maxDist, set(rage, "maxDist"), " st"):SetDisplay(function(v) return v == 0 and "any" or nil end)
@@ -17553,26 +18045,60 @@ function Menu.aimbot(window, hk)
 	OriginSettings:AddDropdown("Mode", { "default", "optimized", "precise" }, rage.originScanMode or "optimized", set(rage, "originScanMode"))
 	tip(OriginSettings:AddToggle("Debug Model", rage.originDebug, set(rage, "originDebug")), "Shows the real shot origin, the scanned point and where the last bullet left from")
 	OriginSettings:AddDropdown("Model", { "Saturn", "Self Avatar" }, rage.originModel or "Saturn", set(rage, "originModel"))
-	OriginSettings:AddToggle("Probe Report", false, function(value)
-		if not value then return end
-		local ok, text = pcall(Rage.probeOrigin)
-		if not ok then
-			Logs.push("Combat", "origin probe failed · " .. tostring(text))
+	local function probeToggle(value)
+		rage.originProbeLog = value
+		if not value then
+			Rage.writeOriginProbe(true)
+			Logs.push("Combat", "origin live log stopped · nev_origin_probe.txt")
 			return
 		end
-		if setclipboard then pcall(setclipboard, text) end
-		if writefile then pcall(writefile, "nev_origin_probe.txt", text) end
-		Logs.push("Combat", "origin probe copied · nev_origin_probe.txt")
-	end)
+		-- Снимок окружения — один раз, при включении (он же копируется в буфер).
+		local ok, text = pcall(Rage.probeOrigin)
+		if ok then
+			if setclipboard then pcall(setclipboard, text) end
+			if writefile then pcall(writefile, "nev_origin_probe_snapshot.txt", text) end
+		end
+		Rage.writeOriginProbe(true)
+		Logs.push("Combat", "origin live log on · nev_origin_probe.txt (snapshot: nev_origin_probe_snapshot.txt)")
+	end
+	Neverlose.cbTags[probeToggle] = { tbl = rage, key = "originProbeLog" }
+	tip(OriginSettings:AddToggle("Probe Report", rage.originProbeLog == true, probeToggle),
+		"Пишет каждое срабатывание origin в лог и в nev_origin_probe.txt — не только один отчёт")
+	local function profileToggle(value)
+		rage.weaponProfilesOn = value
+		Rage.profileKey = nil
+		if value then
+			-- Включил автоматику заново — сбрасываем ручные метки, профиль снова
+			-- ведёт все поля.
+			rage.manualFields = {}
+			local weapon = Game.weapon()
+			if weapon then pcall(Rage.applyWeaponProfile, weapon) end
+		end
+	end
+	Neverlose.cbTags[profileToggle] = { tbl = rage, key = "weaponProfilesOn" }
+	tip(RageMain:AddToggle("Weapon Profiles", rage.weaponProfilesOn ~= false, profileToggle),
+		"Автопрофили под оружие: Range, Scans, Multi Ray, Spot Radius и Min Damage подбираются сами (AWP / винтовка / пистолет / дробовик)")
 	local Walls = RageMain:AddToggle("Aim Through Walls", rage.autowall, set(rage, "autowall"))
 	tip(Walls, "Capped at what the weapon really penetrates")
 	local WallSettings = Walls:AddSettings()
-	WallSettings:AddSlider("Max Walls", 0, 3, rage.maxWalls, set(rage, "maxWalls"), " w")
+	WallSettings:AddSlider("Max Walls", 0, 16, rage.maxWalls, set(rage, "maxWalls"), " w")
+	tip(WallSettings:AddSlider("Multi Ray", 1, 10, rage.multiRay or 3, set(rage, "multiRay"), " rays"), "Rays tested around the aim point when the direct line is blocked. 3-5 is the sweet spot")
+	tip(WallSettings:AddToggle("Wall Spot", rage.spotFind ~= false, set(rage, "spotFind")),
+		"Ищет тонкое место в стене: два кольца точек по цели + сдвиг origin вдоль стены. Радиус автоматически ограничен размером хитбока")
+	WallSettings:AddSlider("Spot Radius", 0.2, 2, tonumber(rage.spotRadius) or 0.6, set(rage, "spotRadius"), " st")
+	local WallLimit = WallSettings:AddToggle("Wall Limit", rage.wallLimit == true, set(rage, "wallLimit"))
+	tip(WallLimit, "Limit wallbangs to Max Walls (dumpfix wallLimit)")
 	WallSettings:AddSlider("Min Damage", 0, 100, rage.wallMinDamage, set(rage, "wallMinDamage")):SetDisplay(function(v) return v == 0 and "any" or nil end)
 
 	local RageSelection = RageTab:AddSection("Selection", "left")
 	RageSelection:AddDropdown("Hitboxes", { "Head", "Chest", "Stomach", "Arms", "Hands", "Legs", "Feet" }, rage.hitboxList, function(list) rage.hitboxList = list end)
 	tip(RageSelection:AddDropdown("Multipoint", { "Head", "Chest", "Stomach" }, rage.multipointList, function(list) rage.multipointList = list end), "Extra aim points around the selected hitboxes")
+	tip(RageSelection:AddSlider("Multipoints", 0, 10, tonumber(rage.multipointCount) or 4, set(rage, "multipointCount"), " pts"),
+		"Сколько точек на каждый выбранный хитбокс. 0 — стрелять только в центр, 10 — максимально плотно")
+	local MpVisual = RageSelection:AddToggle("Multipoint Visual", rage.multipointVisual ~= false, set(rage, "multipointVisual"))
+	tip(MpVisual, "Неоновые точки на хитбоксах цели — видно сквозь стены")
+	local MpSettings = MpVisual:AddSettings()
+	MpSettings:AddColorpicker("Color", rage.multipointColor, setColor(rage, "multipointColor"))
 	if rage.autoHitChance ~= false then rage.hitChance = 0 end
 	local hitSlider = RageSelection:AddSlider("Hit Chance", 0, 100, rage.hitChance, function(v) rage.hitChance, rage.autoHitChance = v, v == 0 end, "%")
 	hitSlider:SetDisplay(function(v) return v == 0 and "Auto" or nil end)

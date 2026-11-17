@@ -205,7 +205,7 @@ Neverlose.config = {
 		history = "High", bodyAfterMiss = true, autoHitChance = true, delayShot = {}, noRecoil = false, recoilReduction = 100, noSpread = false,
 		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 8, originScans = 4, originScanMode = "optimized", originDebug = false, originModel = "Saturn", originProbeLog = false, spotFind = true, spotRadius = 0.6, weaponProfilesOn = true, maxWalls = 2, multiRay = 3, peekReturn = "Shot",
 		preferBodyLethal = false, preferHead = true, scanMode = "Balanced", stickyTarget = false, forceBody = false, missToBody = false, missesToBody = 2, maxDist = 0, multiTarget = false, scanHz = 120, minDmgOverride = false, minDmgOverrideValue = 5,
-		multipointCount = 4, multipointVisual = true, multipointColor = rgb(70, 205, 255),
+		multipointCount = 4, multipointVisual = true, multipointColor = rgb(70, 205, 255), adaptiveRays = true, visFast = true,
 		autoReload = false, reloadAt = 1, remoteReload = false, instaReload = false, reloadSpeed = 3,
 		hitboxList = { "Head", "Chest", "Stomach" }, multipointList = { "Head", "Chest" }, weaponProfiles = {},
 	},
@@ -232,7 +232,7 @@ Neverlose.config = {
 		arrows = false, arrowColor = rgb(255, 255, 255), sounds = false, soundColor = rgb(90, 200, 255),
 		heardPlayers = true, wallBoost = 60, realPos = true, realPosColor = rgb(255, 60, 60), lastSeen = true, lastSeenTime = 10, lastSeenColor = rgb(255, 190, 90), trail = false, soundKinds = "All", soundStyle = "Chams", soundDuration = 2, soundDistance = 700, soundLabels = true, soundTeam = false,
 		soundLinger = 2, soundRing = "Segmented", soundMaxRadius = 10, soundNeon = true, soundNeonColor = rgb(90, 200, 255), soundNeonPower = 60, soundNeonSize = 50,
-		legit = false, visCheck = false, visibleColor = rgb(80, 255, 120), hiddenColor = rgb(120, 150, 255), snapOrigin = "Bottom",
+		legit = false, visCheck = true, visibleColor = rgb(80, 255, 120), hiddenColor = rgb(120, 150, 255), snapOrigin = "Bottom", partVis = true,
 		arrowRadius = 220, arrowSize = 14,
 		colors = { Enemies = espColors(rgb(255, 60, 80)), Teammates = espColors(rgb(60, 160, 255)) },
 		items = { Enemies = {}, Teammates = {} }, layout = {},
@@ -1272,6 +1272,8 @@ Ballistics.blocked = setmetatable({}, { __mode = "k" })
 maid:give(runService.Heartbeat:Connect(function(delta)
 	if delta <= 0 then return end
 	local now = os.clock()
+	-- Записи нужны и рейджу (только при клиентской регистрации), и визуалу
+	-- History. В игре с серверной регистрацией рейдж их не использует (см. scanAll).
 	local keep = HISTORY_WINDOW[Neverlose.config.rage.history] or 0
 
 	for _, entity in ipairs(Game.entities()) do
@@ -3397,7 +3399,7 @@ function ShotTracker.logMiss(entity, shot)
 		if writefile then
 			local lines = { "misses by reason:" }
 			for key, count in pairs(stats.missBy) do lines[#lines + 1] = ("  %s: %d"):format(key, count) end
-			lines[#lines + 1] = ("hits: %d  shots fired: %d  attempts: %d  refused before click: %d"):format((stats.hitCount or 0), stats.shots or 0, stats.attempts or 0, stats.refused or 0)
+			lines[#lines + 1] = ("hits: %d  shots fired: %d  attempts: %d  refused before click: %d  reaction: %.0f ms  scan: %.1f ms"):format((stats.hitCount or 0), stats.shots or 0, stats.attempts or 0, stats.refused or 0, stats.reactMs or 0, stats.scanMs or 0)
 			for index, factor in ipairs(rage and rage.leadArms or {}) do
 				local st = rage.leadStats[index]
 				lines[#lines + 1] = ("lead x%.1f: %s/%s hits"):format(factor, st and tostring(st.h) or "0", st and tostring(st.n) or "0")
@@ -5047,6 +5049,32 @@ Events.on("localHurt", function(damage, died)
 	end
 end)
 
+-- Shitaro-стиль «зрение»: дешёвая проверка, закрыт ли враг геометрией мира.
+-- Использует ту же трассировку, что и выстрел (Ballistics.visible), но по одной
+-- точке — 1–2 луча вместо полного скана хитбоксов. Кэш 0.05 с на цель.
+Rage.sightMemo = Rage.sightMemo or setmetatable({}, { __mode = "k" })
+function Rage.visibleNow(entity, character, origin)
+	local clock = os.clock()
+	local memo = Rage.sightMemo[entity]
+	if memo and clock - memo.t < 0.05 then return memo.seen end
+	local seen = false
+	-- Ballistics.visible = та же трассировка, что и у выстрела: учитывает
+	-- прозрачные части и ignore-list (камера, эффекты, свой персонаж).
+	local head = character and character:FindFirstChild("Head")
+	if head then
+		seen = Ballistics.visible(origin, head.Position, character)
+	else
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root then seen = Ballistics.visible(origin, root.Position, character) end
+	end
+	if not seen then
+		local torso = character and (character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso"))
+		if torso then seen = Ballistics.visible(origin, torso.Position, character) end
+	end
+	Rage.sightMemo[entity] = { t = clock, seen = seen }
+	return seen
+end
+
 ---Cheap pre-filter: skip enemies that are out of range or far outside the aim FOV.
 function Rage.inReach(character, origin, range, fovPixels)
 	local root = character:FindFirstChild("HumanoidRootPart")
@@ -5124,6 +5152,9 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 		return {
 			entity = entity, character = character, part = part, position = position, origin = usedOrigin,
 			offset = record and nil or (position - part.Position),
+			-- Локальная точка на части: прицел едет вместе с телом, а не остаётся
+			-- в старом месте, пока враг двигается/поворачивается.
+			offsetLocal = record and nil or part.CFrame:PointToObjectSpace(position),
 			damage = damage, walls = walls, record = record, distance = distance, health = health, pixels = pixels,
 			cost = cost or 0,
 			chance = Ballistics.hitChance(spread, distance, part.Size.Magnitude / 3) ,
@@ -5282,6 +5313,27 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 								end
 								if best and (best.walls or 0) <= 0 then break end
 							end
+							-- Adaptive Rays: второй проход. Вокруг лучшей точки
+							-- проверяем ещё 8 точек в узком радиусе — это находит
+							-- тонкое место точнее, чем равномерные 50–100 лучей,
+							-- и стоит в разы дешевле.
+							if config.adaptiveRays ~= false and best and (best.walls or 0) > 0 and best.part and best.part.Parent then
+								local refinePoint = best.position or seedPoint
+								local refineRadius = math.max(radius * 0.4, 0.03)
+								for ray = 1, 8 do
+									local angle = (ray - 1) / 8 * math.pi * 2 + 0.19
+									local point = refinePoint + (side * math.cos(angle) + up * math.sin(angle)) * refineRadius
+									local other = evaluate(entity, character, best.part, point, nil)
+									if other and ((other.walls or 0) < (best.walls or 0)
+										or ((other.walls or 0) == (best.walls or 0) and (other.cost or 0) < (best.cost or 0) - 0.05)
+										or ((other.walls or 0) == (best.walls or 0)
+											and math.abs((other.cost or 0) - (best.cost or 0)) <= 0.05
+											and other.damage > best.damage)) then
+										best = other
+										if (best.walls or 0) <= 0 then break end
+									end
+								end
+							end
 							chosen = best
 						end
 					end
@@ -5344,6 +5396,9 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 					-- Пробитие — запасной вариант, но не абсолютно последний:
 					-- смертельный выстрел через стену должен перебивать
 					-- царапину по открытой цели, иначе автоволл бесполезен.
+					-- Shitaro: живая открытая цель важнее выстрела по последней
+					-- запомненной позиции — история не должна перебивать видимого.
+					if chosen.record then score += 1500 end
 					if (chosen.walls or 0) > 0 then score += 100000 + (chosen.cost or 0) * 5 end
 					if config.stickyTarget and Rage.stickyEntity == entity and os.clock() - (Rage.stickyAt or 0) < 0.5 then score -= 1e6 end
 					chosen.score = score
@@ -5367,12 +5422,19 @@ function Rage.aimPoint(target)
 	if target.record and not Game.serverHits then return target.position end
 	local part = target.part
 	if not (part and part.Parent) then return nil end
+	-- Точка в локальных координатах части: пока враг бежит или поворачивается,
+	-- прицел остаётся на его теле, а не в точке, где он был на момент скана.
+	if target.offsetLocal then return part.CFrame:PointToWorldSpace(target.offsetLocal) end
 	return part.Position + (target.offset or Vector3.zero)
 end
 
 -- Moving targets keep getting missed, and the right lead depends on the server. Try a few
 -- lead sizes (scaled by ping) and keep the one that actually hits.
-Rage.leadArms = { -0.7, 0, 0.7, 1.5 }
+-- 0 идёт первым: в игре с серверной регистрацией попаданий сервер сам отматывает
+-- позиции под наш вид, поэтому стрелять надо туда, где враг ВИДЕН сейчас.
+-- Отрицательное ведение (arm -0.7) уводило пулю туда, где он только что был —
+-- это и давало промахи на пиках.
+Rage.leadArms = { 0, 0.7, -0.7, 1.5 }
 Rage.leadStats = {}
 function Rage.leadFor(target)
 	local velocity = Ballistics.velocity(target.entity)
@@ -5403,14 +5465,25 @@ function Rage.leadFor(target)
 	local ping = 0.08
 	pcall(function() ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() / 1000 end)
 	local base = math.clamp(ping * 0.5, 0.02, 0.12)
-	return flat * base * Rage.leadArms[pick.arm], pick.arm
+	local lead = flat * base * Rage.leadArms[pick.arm]
+	-- Скачок скорости (телепорт/респавн) не должен утаскивать прицел на метры.
+	if lead.Magnitude > 8 then lead = lead.Unit * 8 end
+	return lead, pick.arm
 end
 
 function Rage.aimBullet(bullet, target, weapon)
 	if not Game.character(target.entity) then return false end
 	local aim0 = Rage.aimPoint(target)
 	if not aim0 then return false end
-	local lead, leadArm = Rage.leadFor(target)
+	-- Свежий пик/появление: сглаженная скорость ещё показывает СТАРОЕ
+	-- направление, поэтому ведение уводит пулю туда, где он только что был.
+	-- В этом случае бьём точно по живой позиции.
+	local lead, leadArm
+	if target.noLead then
+		lead, leadArm = Vector3.zero, nil
+	else
+		lead, leadArm = Rage.leadFor(target)
+	end
 	-- High ping and a moving target: aim where the enemy should be by now. Never for backtrack records.
 	local predicted
 	if Rage.predictAim and not target.record then
@@ -5873,8 +5946,24 @@ function Rage.refresh(weapon, config)
 	-- Защита кадра: скан не должен съедать больше ~60% кадра. Если рейкасты
 	-- дорогие, частота сама опустится до реально возможной.
 	if scanMs > 0.4 then interval = math.max(interval, scanMs * 0.6 / 1000) end
-	-- Нет целей в поле — 240 Гц не нужны, хватает 90.
-	if not Rage.targets or #Rage.targets == 0 then interval = math.max(interval, 1 / math.min(rate, 90)) end
+	-- Нет целей в поле — не ждём интервал: поиск идёт на максимальной частоте
+	-- (пустой скан почти ничего не стоит), чтобы новая цель ловилась в том же кадре.
+	-- Защиту кадра при этом не отменяем.
+	if not Rage.targets or #Rage.targets == 0 then
+		interval = math.min(interval, 1 / 240)
+		if scanMs > 0.4 then interval = math.max(interval, scanMs * 0.6 / 1000) end
+	else
+		-- Видимая цель уже в списке — не даём сохранённой настройке Scan Rate
+		-- тормозить реакцию: пока враг открыт, пересканируем минимум на 120 Гц.
+		-- Это только частота перепроверки, логика выбора цели та же.
+		for index = 1, #Rage.targets do
+			if (Rage.targets[index].walls or 0) == 0 then
+				interval = math.min(interval, 1 / 120)
+				if scanMs > 0.4 then interval = math.max(interval, scanMs * 0.6 / 1000) end
+				break
+			end
+		end
+	end
 	if now - Rage.lastScan >= interval then
 		Rage.lastScan = now
 		local scanStart = os.clock()
@@ -6008,6 +6097,38 @@ local function rageStep()
 		Rage.seenAt = nil
 	end
 	Rage.stable = target and Rage.stable + 1 or ((os.clock() - (Rage.lastTargetAt or 0) < 0.12) and Rage.stable or 0)
+
+	-- Shitaro-стиль «зрение»: помним, когда враг реально открылся. Момент выхода
+	-- из-за стены — это новый первый выстрел, даже если цель давно в списке.
+	-- Проверка дешёвая (1–2 луча, кэш 0.05 с) и идёт до проверки autoFire, чтобы
+	-- состояние видимости было верным, пока оружие ещё не готово.
+	local nowClock = os.clock()
+	Rage.visState = Rage.visState or setmetatable({}, { __mode = "k" })
+	Rage.peekAt = Rage.peekAt or setmetatable({}, { __mode = "k" })
+	local openNow, fastOpen, peeked = false, false, false
+	if target then
+		local body = Game.character(target.entity)
+		if body then openNow = Rage.visibleNow(target.entity, body, Game.origin()) end
+		openNow = openNow or (target.walls or 0) == 0
+		local state = Rage.visState[target.entity]
+		if not state then
+			state = { open = openNow, at = nowClock }
+			Rage.visState[target.entity] = state
+			if openNow then Rage.peekAt[target.entity] = nowClock end
+		elseif openNow ~= state.open then
+			-- Смена состояния. Новый «первый выстрел» даём только если враг
+			-- реально был закрыт хотя бы 0.1 с — иначе мигание на краю стены
+			-- будет бесконечно сбрасывать требования к шансу.
+			if openNow and nowClock - state.at > 0.1 then Rage.peekAt[target.entity] = nowClock end
+			state.open, state.at = openNow, nowClock
+		end
+		for entity, at in pairs(Rage.peekAt) do
+			if nowClock - at > 3 then Rage.peekAt[entity] = nil end
+		end
+		peeked = openNow and (nowClock - (Rage.peekAt[target.entity] or 0) < 0.35)
+		fastOpen = openNow and (target.walls or 0) == 0 and not target.record and config.visFast ~= false
+			and (target.damage or 0) >= math.max(config.minDamage or 0, 1)
+	end
 	if not (target and config.autoFire and Game.weaponReady(weapon)) then return end
 
 	if config.quickStop then Rage.stopping = true end
@@ -6019,7 +6140,11 @@ local function rageStep()
 	local direct = not revolver and ((config.doubleTap and not slowGun) or (config.rapidFire and Rage.rapidCapable(weapon)))
 	local need = Rage.requiredChance(weapon, target, config)
 	-- An enemy that just stepped out gets shot at once, before he steps back.
-	local fresh = Rage.seenAt and os.clock() - Rage.seenAt < 0.45 and (target.walls or 0) == 0 and (target.damage or 0) >= math.max(config.minDamage or 0, 1)
+	-- Сюда же попадает момент выхода из-за стены (peeked), даже если цель давно
+	-- висит в списке — раньше такой враг ждал полного Hit Chance.
+	local freshOk = (target.damage or 0) >= math.max(config.minDamage or 0, 1)
+	local fresh = freshOk and (target.walls or 0) == 0
+		and ((Rage.seenAt and os.clock() - Rage.seenAt < 0.45) or peeked)
 
 	-- A target strafing across the line of fire is the main source of misses at range.
 	local lateral = 0
@@ -6031,19 +6156,29 @@ local function rageStep()
 			lateral = (velocity - dir * velocity:Dot(dir)).Magnitude
 		end
 	end
-	if lateral > 14 and not fresh and (target.distance or 0) > 35 then need = math.min(need + math.min((lateral - 14) * 0.8, 12), 97) end
-	if Rage.stable < 1 and not fresh then return end
+	-- Свежий пик не штрафуем за боковую скорость: враг как раз выходит на
+	-- скорости, а раньше этот штраф откладывал выстрел ровно в нужный момент.
+	if lateral > 14 and not fresh and not fastOpen and (target.distance or 0) > 35 then
+		need = math.min(need + math.min((lateral - 14) * 0.8, 12), 97)
+	end
+	-- Shitaro-стиль: открытой цели хватает заметно меньшего шанса — важно
+	-- выстрелить первым, пока она не спряталась. Промах по открытому врагу
+	-- дешевле, чем пропущенное окно.
+	local bar = need
+	if fresh then bar = need * 0.7
+	elseif fastOpen then bar = math.clamp(need * 0.6, 25, 55) end
+	if Rage.stable < 1 and not (fresh or fastOpen) then return end
 
 	if (target.walls or 0) > 0 then
 		need = math.min(need + 4, 97)
 		if Rage.stable < 2 then return end
 	end
-	if not direct and target.chance < (fresh and need * 0.75 or need) then return end
+	if not direct and target.chance < bar then return end
 	if direct and target.chance < need * 0.65 and (target.damage or 0) < (target.health or 100) then return end
 	if direct and (target.walls or 0) > 0 and target.chance < need then return end
 	local delayList = type(config.delayShot) == "table" and config.delayShot or {}
 	local needDamage, needChance = table.find(delayList, "Damage"), table.find(delayList, "Hit Chance")
-	if (needDamage or needChance) and not (fresh and target.chance >= need * 0.75) then
+	if (needDamage or needChance) and not fastOpen and not (fresh and target.chance >= need * 0.75) then
 		if Rage.stable < 3 then return end
 		if Rage.delayEntity ~= target.entity then Rage.delayEntity, Rage.delaySince = target.entity, os.clock() end
 		local ready = true
@@ -6053,7 +6188,9 @@ local function rageStep()
 	end
 
 	local streak = Rage.missStreak and Rage.missStreak[target.entity]
-	if streak and streak.n >= 2 and os.clock() - streak.t < 1.2 and not fresh then
+	-- Открытую цель после 2 промахов не «остужаем»: враг стоит на виду, и
+	-- пауза здесь = пропущенное окно. Штраф остаётся только для стен/history.
+	if streak and streak.n >= 2 and os.clock() - streak.t < 1.2 and not fresh and not fastOpen then
 		if Rage.stable < 2 then return end
 	end
 
@@ -6067,7 +6204,7 @@ local function rageStep()
 			end
 			return
 		end
-		if os.clock() - (Rage.scopeAsked or 0) < ((config.quickScope or fresh) and 0.02 or 0.12) then return end
+		if os.clock() - (Rage.scopeAsked or 0) < ((config.quickScope or fresh or fastOpen) and 0.02 or 0.12) then return end
 		if config.quickStop and (Rage.selfSpeed or 0) > 4 then return end
 	end
 
@@ -6079,13 +6216,19 @@ local function rageStep()
 	local cooling = (recentMiss and recentMiss.n >= 2 and os.clock() - recentMiss.t < 1.5) or os.clock() < (Rage.rapidCoolUntil or 0)
 	local rapidOk = not fresh and (target.walls or 0) == 0 and target.chance >= math.min(need + 5, 97) and (target.distance or 0) < 80 and lateral < 10 and Rage.stable >= 6 and Rage.accuracyBonus() <= 4
 	local multiplier = (config.rapidFire and not semiAuto and not cooling and rapidOk) and math.max(Rage.rapidMultiplier(config, fireRate, weapon.Name), 1) or 1
-	local cadence = math.max(fireRate / multiplier + 0.012, 0.055)
+	-- Каденс = ровно темп оружия. Раньше сверху висело +12 мс «на всякий
+	-- случай» — это 10–15% скорости стрельбы на автоматах.
+	local cadence = math.max(fireRate / multiplier + 0.005, 0.03)
 	if now - lastShot < cadence then return end
 	if semiAuto then
 		local waiting = ShotTracker.pending[target.entity]
-		if waiting and now - waiting.t < math.min(fireRate + 0.12, 0.45) then return end
+		-- Не ждём полный re-fire у полуавтомата: 0.4 с паузы после каждого
+		-- выстрела — это и есть ощущение «медленного» бота.
+		if waiting and now - waiting.t < math.min(fireRate * 0.5 + 0.05, 0.18) then return end
 	end
-	local retryAt = now - cadence + 0.07
+	-- Неудачная попытка не должна стоить 70 мс: чаще всего это мигнувшая
+	-- линия на краю стены, и через пару миллисекунд она уже свободна.
+	local retryAt = now - cadence + 0.02
 	lastShot = now
 	Rage.shooting = true
 	local shotStats = Neverlose.stats or {}
@@ -6093,6 +6236,8 @@ local function rageStep()
 	shotStats.attempts = (shotStats.attempts or 0) + 1
 	shotStats.reactMs = (now - (Rage.seenAt or now)) * 1000
 	Rage.delayEntity = nil
+	-- Свежий пик: не ведём цель (см. aimBullet) — пуля должна идти в живую точку.
+	if fresh or fastOpen then target.noLead = true end
 
 	local multi = config.multiTarget and #targets > 1
 	if not revolver and (direct or (multi and not slowGun) or (config.doubleTap and not slowGun)) then
@@ -6173,20 +6318,25 @@ local function rageStep()
 end
 
 local lastRageError
-maid:give(runService.Heartbeat:Connect(function()
+local function rageTick()
 	local ok, err = pcall(rageStep)
 	if not ok and err ~= lastRageError then
 		lastRageError = err
 		warn("[Neverlose] ragebot error: " .. tostring(err))
 	end
-end))
+end
+maid:give(runService.Heartbeat:Connect(rageTick))
+-- Второй тик за кадр (RenderStepped идёт раньше Heartbeat). Реакция на
+-- появившегося врага приходит раньше на несколько мс, а на низком FPS —
+-- практически на полкадра. Двойного выстрела не будет: между тиками
+-- работает обычный каденс оружия.
+maid:give(runService.RenderStepped:Connect(rageTick))
 
 -- Multipoint Visual: неоновые точки на хитбоксах цели, видны сквозь стены.
 -- Рисуются ровно по тем точкам, по которым рейдж реально проверяет пробитие,
 -- поэтому включённый визуал = честная картинка того, куда он стреляет.
 do
 	local marks, shown = {}, 0
-	local glows, glowsShown = {}, 0
 	local function mark(index)
 		local adorn = marks[index]
 		if not adorn then
@@ -6198,20 +6348,10 @@ do
 		end
 		return adorn
 	end
-	local function glow(index)
-		local highlight = glows[index]
-		if not highlight then
-			highlight = newInstance("Highlight", {
-				Name = randomName(), DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
-			}, effectsFolder)
-			glows[index] = highlight
-		end
-		return highlight
-	end
 	maid:give(runService.RenderStepped:Connect(function()
 		local config = Neverlose.config.rage
 		local color = config.multipointColor
-		local used, lit = 0, 0
+		local used = 0
 		if config.multipointVisual ~= false and typeof(color) == "Color3" then
 			local count = math.clamp(math.floor(tonumber(config.multipointCount) or 0), 0, 10)
 			local names = hitboxParts(config.multipointList, config.multipoint, true)
@@ -6220,15 +6360,6 @@ do
 				local entry = targets[index]
 				local character = entry and entry.character
 				if character and character.Parent then
-					-- Неоновый контур цели сквозь стены, тот же цвет.
-					lit += 1
-					local highlight = glow(lit)
-					highlight.Adornee = character
-					highlight.FillColor = color
-					highlight.OutlineColor = color
-					highlight.FillTransparency = 0.88
-					highlight.OutlineTransparency = 0.12
-					highlight.Enabled = true
 					for _, name in ipairs(names) do
 						local part = character:FindFirstChild(name)
 						if part then
@@ -6254,11 +6385,7 @@ do
 			local adorn = marks[index]
 			if adorn then adorn.Visible = false end
 		end
-		for index = lit + 1, glowsShown do
-			local highlight = glows[index]
-			if highlight then highlight.Enabled = false end
-		end
-		shown, glowsShown = used, lit
+		shown = used
 	end))
 end
 
@@ -6704,7 +6831,7 @@ local LIMB_CORNERS = { Vector3.new(0, 0, 0), Vector3.new(1, 1, 1), Vector3.new(-
 local function limbSight(from, character)
 	local cached = limbCache[character]
 	local clock = os.clock()
-	if cached and clock - cached.t < 0.06 then return cached.seen end
+	if cached and clock - cached.t < 0.2 then return cached.seen end
 	local seen = false
 	for _, object in ipairs(character:GetChildren()) do
 		if object:IsA("BasePart") and object.Transparency < 0.95 and object.Name ~= "HumanoidRootPart" then
@@ -6721,25 +6848,36 @@ local function limbSight(from, character)
 end
 
 local SIGHT_FEET, SIGHT_CHEST, SIGHT_SOLE = Vector3.new(0, 2, 0), Vector3.new(0, 0.9, 0), Vector3.new(0, 2.8, 0)
+-- Shitaro-стиль: считаем ДОЛЮ видимых точек (0..1), а не «виден хотя бы один».
+-- Из этой доли потом плавно смешиваются видимый и «за стеной» цвета.
+local sightCache = setmetatable({}, { __mode = "k" })
 function bodySight(from, root, head, character)
+	local cached = character and sightCache[character]
+	local clock = os.clock()
+	if cached and clock - cached.t < 0.1 then return cached.frac end
 	local right = root.CFrame.RightVector
 	local base = root.Position
-	local count = head and 8 or 7
-	-- Callers only test for > 0, so the first visible sample ends the scan.
-	for index = 1, count do
-		local point
-		if index == 1 then point = base
-		elseif index == 2 then point = base + right * 1.1
-		elseif index == 3 then point = base - right * 1.1
-		elseif index == 4 then point = base - SIGHT_FEET
-		elseif index == 5 then point = base + SIGHT_CHEST + right * 0.8
-		elseif index == 6 then point = base + SIGHT_CHEST - right * 0.8
-		elseif index == 7 then point = base - SIGHT_SOLE
-		else point = head.Position end
-		if not blockedBetween(from, point) then return 1 / count end
+	local samples = {
+		base,
+		base + right * 1.1,
+		base - right * 1.1,
+		base - SIGHT_FEET,
+		base + SIGHT_CHEST + right * 0.8,
+		base + SIGHT_CHEST - right * 0.8,
+		base - SIGHT_SOLE,
+		base + right * 0.55 - Vector3.new(0, 1.4, 0),
+		base - right * 0.55 - Vector3.new(0, 1.4, 0),
+		head and head.Position or (base + Vector3.new(0, 1.6, 0)),
+	}
+	local seen = 0
+	for index = 1, #samples do
+		if not blockedBetween(from, samples[index]) then seen += 1 end
 	end
-	if character and limbSight(from, character) then return 1 / count end
-	return 0
+	local frac = seen / #samples
+	-- Ни одна контрольная точка не видна — пробуем углы конечностей.
+	if frac <= 0 and character and limbSight(from, character) then frac = 1 / #samples end
+	if character then sightCache[character] = { t = clock, frac = frac } end
+	return frac
 end
 end
 
@@ -7530,10 +7668,7 @@ end
 do
 local EspObject = {}
 
--- ESP visibility 1:1 из zypdm | dumpf1x: один луч камера -> голова, кэш 0.12 с,
--- в фильтре только свой персонаж и камера.
-local visParams = RaycastParams.new()
-visParams.FilterType = Enum.RaycastFilterType.Exclude
+-- ESP visibility: доля открытого тела (bodySight), цвета смешиваются hidden -> visible.
 EspObject.__index = EspObject
 
 local FILL_STRIPS = 24
@@ -7862,8 +7997,8 @@ function EspObject:drawGhost(character, record, chams)
 	local boost = slot == "wallGhost" and math.clamp((Neverlose.config.esp.wallBoost or 60) / 100, 0, 1) or 0
 	local fillT = math.min(style.fill + (style.pulse and 0.16 * breath or 0), 1)
 	light.FillTransparency = fillT + (math.min(fillT, 0.4) - fillT) * boost
-	light.OutlineColor = slot == "wallGhost" and color or color:Lerp(Color3.new(1, 1, 1), style.rim or 0.35)
-	light.OutlineTransparency = math.max(style.outline - 0.05, 0) * (1 - boost)
+	-- Без обводки: у чамсов остаётся только цветная заливка.
+	light.OutlineColor, light.OutlineTransparency = color, 1
 	if any and Neverlose.Xray then
 		local xrayT = math.clamp(0.42 + style.fill * 0.4, 0.42, 0.85)
 		Neverlose.Xray.set(ghost, character, color, xrayT + (0.18 - xrayT) * boost, record)
@@ -8053,8 +8188,9 @@ maid:give(function()
 end)
 end
 
-function EspObject:applyChams(character, visible, walls, glow, forceColor, inSight)
+function EspObject:applyChams(character, visible, walls, glow, forceColor, inSight, mix)
 	local wallStyle, visibleStyle = CHAMS_STYLE[walls.mode], CHAMS_STYLE[visible.mode]
+	mix = math.clamp(tonumber(mix) or (inSight and 1 or 0), 0, 1)
 
 	if wallStyle and not wallStyle.neon and not (inSight == true and visibleStyle ~= nil) then
 		local record = { cframes = {} }
@@ -8070,37 +8206,58 @@ function EspObject:applyChams(character, visible, walls, glow, forceColor, inSig
 	if not cache then cache = {} self.chamsCache = cache end
 	local glowOn = glow and glow.on
 	local frameStyle = (inSight == true and visibleStyle) or wallStyle
+	-- Shitaro-стиль: пока включён per-part, chams обязаны обновляться каждый кадр,
+	-- иначе переход видимый/невидимый застынет после первого изменения.
+	local perPart = visibleStyle ~= nil and wallStyle ~= nil and visibleStyle.neon == true and wallStyle.neon == true
+		and Neverlose.config.esp.partVis ~= false
 	local pulsing = (wallStyle and (wallStyle.pulse or wallStyle.rainbow or wallStyle.neon)) or (visibleStyle and (visibleStyle.rainbow or visibleStyle.neon))
+	if perPart then pulsing = true end
 	local refresh = pulsing and frameStyle ~= nil and frameStyle.neon == true
+	local mixKey = math.floor(mix * 20 + 0.5)
 	if cache.character == character and cache.wm == walls.mode and cache.wc == walls.color and cache.vm == visible.mode and cache.vc == visible.color
-		and cache.sight == inSight and cache.glow == glowOn and cache.gc == (glow and glow.color) and cache.force == forceColor then
+		and cache.sight == inSight and cache.glow == glowOn and cache.gc == (glow and glow.color) and cache.force == forceColor
+		and cache.mix == mixKey then
 		if not pulsing or (not refresh and os.clock() - cache.at < 0.04) then return end
 	end
 	cache.character, cache.wm, cache.wc, cache.vm, cache.vc = character, walls.mode, walls.color, visible.mode, visible.color
 	cache.sight, cache.glow, cache.gc, cache.force, cache.at = inSight, glowOn, glow and glow.color, forceColor, os.clock()
+	cache.mix = mixKey
 
 	local back = self.highlight
 	self.highlightVisible.Enabled = false
 	local sighted = inSight == true and visibleStyle ~= nil
 	local style = sighted and visibleStyle or wallStyle
-	local layer = sighted and visible or walls
-	local color = forceColor or layer.color or Color3.new(1, 1, 1)
+	-- Цвет: Behind Walls -> Player по доле открытого тела. Если один из стилей
+	-- выключен, берём цвет включённого, чтобы не смешивать с белым.
+	local color = forceColor
+	if not color then
+		local visCol = visibleStyle and (visible.color or Color3.new(1, 1, 1)) or nil
+		local wallCol = wallStyle and (walls.color or Color3.new(1, 1, 1)) or nil
+		if visCol and wallCol then
+			color = wallCol:Lerp(visCol, mix)
+		else
+			color = visCol or wallCol or Color3.new(1, 1, 1)
+		end
+	end
 	if style and style.rainbow and not forceColor then color = Color3.fromHSV((os.clock() * 0.2) % 1, 0.7, 1) end
 	if style and style.neon then
-		self:neonShow(character, color, glow)
+		self:neonShow(character, color, glow, { vis = visible, wall = walls, mix = mix, visibleStyle = visibleStyle, wallStyle = wallStyle })
 	else
 		self:neonHide()
 	end
 	local xray = style ~= nil and not sighted
 	Neverlose.Xray.clear(self)
-	if style and not xray and not style.neon then
+	-- Highlight больше не красит чамсы: у стилей с материалом тело красит сам
+	-- материал, а заливка Highlight только размывала цвет и рисовала края.
+	-- Оставлен только стилям без материала (Chams, Flat, Fresnel) — иначе они пропадут.
+	if style and not xray and not style.neon and not style.material then
 		back.Adornee, back.DepthMode = character, Enum.HighlightDepthMode.AlwaysOnTop
 		local breath = 0.5 + 0.5 * math.sin(os.clock() * 2.4)
 		local fillT = math.min(style.fill + (style.pulse and 0.16 * breath or 0), 1)
 		if style.material then fillT = 1 end
 		back.FillColor, back.FillTransparency = color, fillT
-		back.OutlineColor = sighted and color:Lerp(Color3.new(1, 1, 1), style.rim or 0.35) or color
-		back.OutlineTransparency = math.max(style.outline - 0.05, 0)
+		-- Края (обводка Highlight) убраны: цветной заливки достаточно.
+		back.OutlineColor, back.OutlineTransparency = color, 1
 		back.Enabled = true
 	else
 		back.Enabled = false
@@ -8378,10 +8535,24 @@ function EspObject:neonDestroy()
 	self.neon = nil
 end
 
-function EspObject:neonShow(character, color, glow)
+-- Shitaro-стиль: каждая часть тела отдельно помечается видимой/невидимой.
+local NEON_PART_GROUP = {
+	Head = "head",
+	UpperTorso = "torso", LowerTorso = "torso",
+	LeftUpperArm = "arms", RightUpperArm = "arms",
+	LeftLowerArm = "arms", RightLowerArm = "arms",
+	LeftHand = "arms", RightHand = "arms",
+	LeftUpperLeg = "legs", RightUpperLeg = "legs",
+	LeftLowerLeg = "legs", RightLowerLeg = "legs",
+	LeftFoot = "legs", RightFoot = "legs",
+}
+local NEON_GROUP_PART = { head = "Head", torso = "UpperTorso", arms = "RightUpperArm", legs = "RightUpperLeg" }
+local NEON_GROUP_ORDER = { "head", "torso", "arms", "legs" }
+
+function EspObject:neonShow(character, color, glow, layers)
 	if not chamsTarget() then self:neonHide() return end
 	local settings = Neverlose.config.esp
-	local intensity = math.clamp(settings.neonIntensity or 4, 1, 8)
+	local intensity = math.clamp(settings.neonIntensity or 4, 1, 12)
 	local glowScale = 1 + math.clamp(settings.neonHalo or 18, 0, 60) / 150
 	local neon = self.neon
 	if not neon then
@@ -8389,16 +8560,47 @@ function EspObject:neonShow(character, color, glow)
 			parts = {}, slots = setmetatable({}, { __mode = "k" }), links = {},
 			character = nil, headTrim = 1, shown = false, armed = false,
 			fillCol = nil, glowCol = nil, fade = nil, gen = chamsGen,
+			groupVis = {}, groupAt = 0, cursor = 0,
 		}
 		self.neon = neon
 	end
 	if neon.gen ~= chamsGen then self:neonClear() end
-	if neon.character ~= character then self:neonBind(character) end
+	if neon.character ~= character then
+		self:neonBind(character)
+		neon.groupVis, neon.groupAt, neon.cursor = {}, 0, 0
+	end
 	if not (neon.character and neon.character.Parent) then self:neonHide() return end
 	local fillColor = color or Color3.new(1, 1, 1)
 	local glowBase = fillColor
 	if glow and glow.on and typeof(glow.color) == "Color3" then glowBase = glow.color end
 	local glowColor = Color3.new(glowBase.R * intensity, glowBase.G * intensity, glowBase.B * intensity)
+
+	-- Видимые части — цвет Player, закрытые — цвет Behind Walls. Доля (mix)
+	-- задаёт глобальный переход, per-part уточняет его по каждой части.
+	local visColor, wallColor, mix = fillColor, fillColor, 1
+	local perPart = false
+	if layers then
+		visColor = (layers.visibleStyle and layers.vis and layers.vis.color) or fillColor
+		wallColor = (layers.wallStyle and layers.wall and layers.wall.color) or visColor
+		mix = math.clamp(tonumber(layers.mix) or 1, 0, 1)
+		perPart = settings.partVis ~= false and layers.visibleStyle ~= nil and layers.wallStyle ~= nil
+			and visColor ~= wallColor
+	end
+	local wallAlpha = 1 - math.clamp((settings.wallBoost or 60) / 100, 0, 1)
+	if perPart then
+		-- Один замер на кадр по кругу (head/torso/arms/legs), без просадки FPS.
+		local now = os.clock()
+		if now - neon.groupAt > 0.05 then
+			neon.groupAt = now
+			neon.cursor = (neon.cursor % #NEON_GROUP_ORDER) + 1
+			local group = NEON_GROUP_ORDER[neon.cursor]
+			local probe = character:FindFirstChild(NEON_GROUP_PART[group])
+			if probe then
+				neon.groupVis[group] = not blockedBetween(currentCamera.CFrame.Position, probe.Position)
+			end
+		end
+	end
+
 	local transparency = 0
 	if not neon.armed then
 		neon.armed = true
@@ -8447,6 +8649,20 @@ function EspObject:neonShow(character, color, glow)
 			local size = (slot.base * shrink):Max(Vector3.new(0.004, 0.004, 0.004))
 			slot.fill.CFrame, slot.fill.Size = frame, size
 			slot.glow.CFrame, slot.glow.Size = frame, size * glowScale
+			if perPart then
+				local group = NEON_PART_GROUP[part.Name]
+				local seen = group and neon.groupVis[group]
+				if seen == nil then seen = mix >= 0.5 end
+				local goal = seen and 1 or 0
+				slot.mix = slot.mix or goal
+				slot.mix += (goal - slot.mix) * 0.25
+				if slot.mix > 0.995 then slot.mix = 1 elseif slot.mix < 0.005 then slot.mix = 0 end
+				local partColor = wallColor:Lerp(visColor, slot.mix)
+				slot.fill.Color3 = partColor
+				slot.glow.Color3 = Color3.new(partColor.R * intensity, partColor.G * intensity, partColor.B * intensity)
+				local alpha = (1 - slot.mix) * wallAlpha
+				slot.fill.Transparency, slot.glow.Transparency = alpha, alpha
+			end
 		end
 	end
 end
@@ -9349,29 +9565,40 @@ function EspObject:update(delta)
 		else
 			self:hideHighlights()
 		end
-	elseif config.legit or (modelsOn and CHAMS_STYLE[model.player.mode] ~= nil) then
+	elseif (config.visCheck and isEnemy) or config.legit or (modelsOn and CHAMS_STYLE[model.player.mode] ~= nil)
+		or (modelsOn and CHAMS_STYLE[model.walls.mode] ~= nil) then
 
-		if os.clock() - (self.wallsAt or 0) > 0.016 then
+		-- Shitaro: пересчёт не каждый кадр, а ~10 раз в секунду на цель.
+		-- Дальше 350 стадов цвет не важен, а рейкасты стоят дорого.
+		if distance <= 350 and os.clock() - (self.wallsAt or 0) > 0.1 then
 			self.wallsAt = os.clock()
 			local eye = currentCamera.CFrame.Position
-			local fraction = bodySight(eye, root, head, character)
-			self.sightFrac = fraction
-			-- Any visible sample flips it on at once; it only drops after a short grace.
-			if fraction > 0 then
-				self.inSight, self.sightLostAt = true, nil
-			elseif self.inSight == true then
-				self.sightLostAt = self.sightLostAt or os.clock()
-				if os.clock() - self.sightLostAt > 0.08 then self.inSight, self.sightLostAt = false, nil end
-			else
-				self.inSight = false
-			end
+			self.sightFrac = bodySight(eye, root, head, character)
+		end
+		local goal = self.sightFrac or (self.inSight and 1 or 0)
+		self.visMix = self.visMix or goal
+		-- Плавно, без «дыхания»: цвет догоняет реальную видимость.
+		self.visMix += (goal - self.visMix) * math.clamp((delta or 0.016) * 12, 0, 1)
+		if self.visMix > 0.995 then self.visMix = 1 elseif self.visMix < 0.005 then self.visMix = 0 end
+		local now = os.clock()
+		-- Видимой считаем цель, у которой открыто заметная часть тела,
+		-- а не только макушка (как было с одним лучом в голову).
+		if (self.sightFrac or 0) >= 0.15 then
+			self.inSight, self.sightLostAt = true, nil
+		elseif self.inSight == true then
+			self.sightLostAt = self.sightLostAt or now
+			if now - self.sightLostAt > 0.12 then self.inSight, self.sightLostAt = false, nil end
+		else
+			self.inSight = false
 		end
 		revealed = (not isEnemy) or (self.sightFrac or 0) > 0 or self:isRevealed(character, root, head)
 	else
 		self.inSight = true
+		self.visMix = 1
+		self.sightFrac = 1
 	end
 	if modelsOn and revealed then
-		self:applyChams(character, model.player, model.walls, model.glow, nil, self.inSight)
+		self:applyChams(character, model.player, model.walls, model.glow, nil, self.inSight, self.visMix)
 	elseif not ghostAge then
 		self:hideHighlights()
 	end
@@ -9381,29 +9608,13 @@ function EspObject:update(delta)
 	if not espOn then return self:hideDrawings() end
 
 	local boxColor, nameColor, skeletonColor, fillColor, snapColor = colors.box, colors.name, colors.skeleton, colors.fill, colors.snapline
-	-- Visibility 1:1 из zypdm | dumpf1x: один луч камера -> голова, кэш 0.12 с.
-	-- Визуал неверлузовский: плавный переход hiddenColor -> visibleColor.
+	-- Shitaro-стиль: цвет ESP смешивается hidden -> visible по доле открытого тела
+	-- (visMix из bodySight), а не по одному лучу в голову. Не мигает и не «дышит».
 	local tint
 	if config.visCheck and isEnemy then
-		if ghostAge then
-			self.visible = false
-		elseif os.clock() - self.visibleAt > 0.12 then
-			self.visibleAt = os.clock()
-			local eye = currentCamera.CFrame.Position
-			local point = (head or root).Position
-			local filter = { currentCamera }
-			local body = localPlayer.Character
-			if body then filter[#filter + 1] = body end
-			visParams.FilterDescendantsInstances = filter
-			local hit = workspaceService:Raycast(eye, point - eye, visParams)
-			self.visible = hit == nil or hit.Instance:IsDescendantOf(character)
-		end
-		-- Blend between hidden and visible instead of snapping, so peeking in
-		-- and out of cover reads as a fade rather than a flicker.
-		local goal = self.visible and 1 or 0
-		self.visMix = self.visMix or goal
-		self.visMix = self.visMix + (goal - self.visMix) * math.clamp((delta or 0.016) * 10, 0, 1)
-		tint = config.hiddenColor:Lerp(config.visibleColor, self.visMix)
+		local mix = ghostAge and 0 or (self.visMix or self.sightFrac or 0)
+		self.visible = mix >= 0.5
+		tint = config.hiddenColor:Lerp(config.visibleColor, math.clamp(mix, 0, 1))
 		boxColor, nameColor, skeletonColor, fillColor, snapColor = tint, tint, tint, tint, tint
 	end
 
@@ -11357,9 +11568,6 @@ function Preview.update()
 	local center = position.X + boxSize.X / 2
 
 	local boxColor, nameColor, skeletonColor, fillColor = colors.box, colors.name, colors.skeleton, colors.fill
-	if config.visCheck then
-		boxColor, nameColor, skeletonColor, fillColor = config.visibleColor, config.visibleColor, config.visibleColor, config.visibleColor
-	end
 
 	local showBox = item(team, "Main/Bounding Box")
 	local style = config.boxStyle
@@ -16991,6 +17199,8 @@ function Menu.visuals(window, hk)
 		if typeof(color) == "Color3" then esp.hiddenColor = color end
 		if type(enabled) == "boolean" then esp.visCheck = enabled end
 	end)
+	-- Второй цвет как в Shitaro: видимая цель / цель за стеной.
+	espSettings:AddColorpicker("Visible Color", esp.visibleColor, setColor(esp, "visibleColor"))
 	local arrow = enemy:AddToggleColorpicker("Offscreen Arrow", esp.arrows, esp.arrowColor, set(esp, "arrows"), setColor(esp, "arrowColor"))
 	local arrowSettings = arrow:AddSettings()
 	arrowSettings:AddSlider("Radius", 80, 500, esp.arrowRadius, set(esp, "arrowRadius"), "px")
@@ -17023,6 +17233,8 @@ function Menu.visuals(window, hk)
 	Neverlose.modelRow(enemyModel, "Player", model.player)
 	Neverlose.modelRow(enemyModel, "Behind Walls", model.walls)
 	enemyModel:AddSlider("Wall Visibility", 0, 100, esp.wallBoost or 60, set(esp, "wallBoost"), "%")
+	tip(enemyModel:AddToggle("Per-part Visibility", esp.partVis ~= false, set(esp, "partVis")),
+		"Shitaro-стиль: каждая часть тела красится отдельно — открытая рука/голова цветом Player, скрытая за стеной — цветом Behind Walls. Работает, когда Player и Behind Walls стоят на стиле Neon")
 	Neverlose.modelRow(enemyModel, "On Shot", model.onShot)
 	Neverlose.modelRow(enemyModel, "History", model.history)
 	Neverlose.modelRow(enemyModel, "Ragdolls", model.ragdolls)
@@ -17038,7 +17250,7 @@ function Menu.visuals(window, hk)
 		task.defer(function() pcall(function() killPreview:Set(false, true) end) end)
 	end)
 	local glowSettings = Neverlose.colorToggle(enemyModel, "Glow", model.glow):AddSettings()
-	glowSettings:AddSlider("Neon Intensity", 1, 8, esp.neonIntensity, set(esp, "neonIntensity"), "x")
+	glowSettings:AddSlider("Neon Intensity", 1, 12, esp.neonIntensity, set(esp, "neonIntensity"), "x")
 	glowSettings:AddSlider("Neon Halo", 0, 60, esp.neonHalo, set(esp, "neonHalo"), "%")
 
 	local teammate = players:AddSection("Teammate", "left")
@@ -18086,6 +18298,8 @@ function Menu.aimbot(window, hk)
 	tip(WallSettings:AddToggle("Wall Spot", rage.spotFind ~= false, set(rage, "spotFind")),
 		"Ищет тонкое место в стене: два кольца точек по цели + сдвиг origin вдоль стены. Радиус автоматически ограничен размером хитбока")
 	WallSettings:AddSlider("Spot Radius", 0.2, 2, tonumber(rage.spotRadius) or 0.6, set(rage, "spotRadius"), " st")
+	tip(WallSettings:AddToggle("Adaptive Rays", rage.adaptiveRays ~= false, set(rage, "adaptiveRays")),
+		"Два прохода: широкое кольцо → уточнение вокруг лучшей точки. Находит тонкое место лучше, чем 50–100 равномерных лучей")
 	local WallLimit = WallSettings:AddToggle("Wall Limit", rage.wallLimit == true, set(rage, "wallLimit"))
 	tip(WallLimit, "Limit wallbangs to Max Walls (dumpfix wallLimit)")
 	WallSettings:AddSlider("Min Damage", 0, 100, rage.wallMinDamage, set(rage, "wallMinDamage")):SetDisplay(function(v) return v == 0 and "any" or nil end)
@@ -18109,6 +18323,8 @@ function Menu.aimbot(window, hk)
 	local Override = RageSelection:AddToggle("Min Damage Override", rage.minDmgOverride, set(rage, "minDmgOverride"))
 	hk["Min Damage Override"] = Override
 	Override:AddSettings():AddSlider("Override Damage", 1, 100, rage.minDmgOverrideValue, set(rage, "minDmgOverrideValue"))
+	tip(RageSelection:AddToggle("Shoot Visible First", rage.visFast ~= false, set(rage, "visFast")),
+		"Shitaro-стиль: открытая цель получает первый выстрел сразу — без ожидания стабильности, Delay Shot и паузы после промахов. Выключи, если стреляет слишком рано")
 	tip(RageSelection:AddToggle("Force Body", rage.forceBody, set(rage, "forceBody")), "Skips the head hitbox")
 	local MissBody = RageSelection:AddToggle("Body After Misses", rage.missToBody, set(rage, "missToBody"))
 	tip(MissBody, "Body only after the set number of misses on that enemy")

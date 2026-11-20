@@ -172,6 +172,7 @@ local function espColors(main)
 		skeleton = main, name = main, distance = rgb(210, 210, 215), weapon = rgb(230, 230, 235), weaponIcon = rgb(255, 255, 255),
 		health = rgb(90, 255, 110), healthLow = rgb(255, 60, 60), healthText = rgb(255, 255, 255),
 		armor = rgb(90, 170, 255), ammo = rgb(90, 170, 255), ready = rgb(255, 210, 90),
+		armor2 = rgb(40, 90, 235), ammo2 = rgb(40, 90, 235), armorGradient = true, ammoGradient = true,
 		flags = rgb(235, 235, 240), aim = rgb(150, 164, 255), hitboxes = rgb(150, 164, 255), hitboxes2 = rgb(255, 110, 150),
 		snapline = main, headDot = rgb(255, 255, 255),
 		fixedBox = false, fixedW = 46, fixedH = 84, boxPad = 3, tightBox = true,
@@ -199,13 +200,13 @@ Neverlose.config = {
 	rage = {
 		enabled = false, fov = 180, priority = "Distance", showFov = false, delayWait = { "Hit Chance" }, delayDamage = 50, delayChance = 60, delayMax = 400,
 		silent = false, silentAuto = true, silentHitChance = 100, silentHitbox = "Head",
-		autoFire = false, autowall = false, wallLimit = false, wallMinDamage = 0,
+		autoFire = false, autowall = false, wallMinDamage = 0,
 		target = "Highest Damage", hitboxes = "Head, Chest, Stomach", multipoint = "Head, Chest, Stomach",
 		hitChance = 50, minDamage = 15, quickStop = false, quickScope = false,
 		history = "High", bodyAfterMiss = true, autoHitChance = true, delayShot = {}, noRecoil = false, recoilReduction = 100, noSpread = false,
-		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, originRange = 8, originScans = 4, originScanMode = "optimized", originDebug = false, originModel = "Saturn", originProbeLog = false, spotFind = true, spotRadius = 0.6, weaponProfilesOn = true, maxWalls = 2, multiRay = 3, peekReturn = "Shot",
+		duckPeek = false, quickPeek = false, doubleTap = false, dtMode = "Adaptive", dtDelay = 40, autoScope = false, rapidFire = false, rapidAuto = true, rapidSpeed = 150, originScan = true, wallAggro = 100, originRange = 10, originScans = 6, originScanMode = "optimized", originFields = "Auto", originDebug = false, originModel = "Saturn", originProbeLog = false, spotFind = true, spotRadius = 0.7, weaponProfilesOn = true, maxWalls = 3, multiRay = 8, peekReturn = "Shot",
 		preferBodyLethal = false, preferHead = true, scanMode = "Balanced", stickyTarget = false, forceBody = false, missToBody = false, missesToBody = 2, maxDist = 0, multiTarget = false, scanHz = 120, minDmgOverride = false, minDmgOverrideValue = 5,
-		multipointCount = 4, multipointVisual = true, multipointColor = rgb(70, 205, 255), adaptiveRays = true, visFast = true,
+		multipointCount = 4, multipointVisual = true, multipointColor = rgb(70, 205, 255), adaptiveRays = true, visFast = true, instantShot = true,
 		autoReload = false, reloadAt = 1, remoteReload = false, instaReload = false, reloadSpeed = 3,
 		hitboxList = { "Head", "Chest", "Stomach" }, multipointList = { "Head", "Chest" }, weaponProfiles = {},
 	},
@@ -1114,7 +1115,7 @@ local function traceOnce(origin, direction, range, targetCharacter, penetration)
 			if targetCharacter and part:IsDescendantOf(targetCharacter) then return hits, true, walls, cost end
 
 			if penetration == math.huge then
-				-- wallLimit: стена считается, но не мешает (урон потом как без стен).
+				-- Бесконечное пробитие: стена считается, но не мешает.
 				exitParams.FilterDescendantsInstances = { part }
 				local far = result.Position + dir * 1000
 				local back = workspaceService:Raycast(far, result.Position - far, exitParams)
@@ -1132,16 +1133,19 @@ local function traceOnce(origin, direction, range, targetCharacter, penetration)
 
 				local thickness = (result.Position - back.Position).Magnitude
 				local material = wallMaterial(part)
-				cost += Ballistics.wallCost(material, thickness)
+				-- Milk: cost = самая израсходованная доля лимита пробития (0..1) среди материалов.
+				-- Сервер режет по накопленной толщине на материал, поэтому путь с запасом надёжнее.
 				local variant = part.MaterialVariant
 				if variant ~= "" and Ballistics.penVariants[variant] then
 					spentVariant[variant] = (spentVariant[variant] or 0) + thickness
-					if spentVariant[variant] > penThreshold(0) + penetration then return hits, false, walls, cost end
+					local limit = penThreshold(0) + penetration
+					if spentVariant[variant] > limit then return hits, false, walls, cost end
+					cost = math.max(cost, spentVariant[variant] / math.max(limit, 0.001))
 				else
 					spent[material] = (spent[material] or 0) + thickness
-					if spent[material] > penThreshold(Ballistics.penBonus[material] or 0) + penetration then
-						return hits, false, walls, cost
-					end
+					local limit = penThreshold(Ballistics.penBonus[material] or 0) + penetration
+					if spent[material] > limit then return hits, false, walls, cost end
+					cost = math.max(cost, spent[material] / math.max(limit, 0.001))
 				end
 
 				hits[#hits + 1] = toHit(back, true)
@@ -1155,18 +1159,14 @@ local function traceOnce(origin, direction, range, targetCharacter, penetration)
 end
 Ballistics.traceRaw = traceOnce
 
--- uT 1:1: в server hit-mode всегда Penetration оружия; wallLimit на клиенте
--- даёт бесконечное пробитие, а число стен проверяет вызывающий код.
+-- uT 1:1: в server hit-mode всегда Penetration оружия. Число стен проверяет
+-- вызывающий код через Ballistics.allowedWalls (профиль оружия).
 function Ballistics.trace(origin, direction, range, targetCharacter, maxWalls, penetration)
 	local pen = penetration
 	if pen == nil then
 		local weapon = Game.weapon()
 		local properties = weapon and weapon.Properties
-		if not Game.serverHits and Neverlose.config.rage.wallLimit then
-			pen = math.huge
-		else
-			pen = properties and properties.Penetration or 0
-		end
+		pen = properties and properties.Penetration or 0
 	end
 	local hits, reached, walls, cost = traceOnce(origin, direction, range, targetCharacter, pen)
 	if reached and (maxWalls or 0) < walls then reached = false end
@@ -1191,8 +1191,6 @@ function Ballistics.wallResult(name, walls, accepted, parts)
 		st.wallOk = (st.wallOk or 0) + 1
 		st.wallStreak = 0
 		Ballistics.wallFails[key] = 0
-		local learned = Ballistics.wallLimit[name]
-		if learned and walls > learned.limit then Ballistics.wallLimit[name] = nil end
 		return
 	end
 	st.wallFail = (st.wallFail or 0) + 1
@@ -1202,13 +1200,6 @@ function Ballistics.wallResult(name, walls, accepted, parts)
 		st.wallStreak = 0
 	end
 	Ballistics.wallFails[key] = (Ballistics.wallFails[key] or 0) + 1
-	-- Три отказа подряд по одному и тому же числу стен — только тогда это
-	-- похоже на серверный лимит, а не на разброс или бегущую цель. Раньше
-	-- хватало двух промахов, и автоволл душился на 45 секунд.
-	if Ballistics.wallFails[key] >= 4 then
-		Ballistics.wallLimit[name] = { limit = math.max(walls - 1, 0), expires = os.clock() + 20 }
-		Ballistics.wallFails[key] = 0
-	end
 end
 
 function Ballistics.withDistances(origin, hits)
@@ -1249,24 +1240,20 @@ end
 
 function Ballistics.allowedWalls(weapon, enabled, cap)
 	local config = Neverlose.config.rage
-	-- wallLimit 1:1 из dumpfix: не больше Max Walls стен на выстрел.
-	if config.wallLimit then
-		local limit = tonumber(config.maxWalls) or 1
-		return math.clamp(math.floor(limit), 0, 16)
-	end
 	if not enabled then return 0 end
-	-- rageAutowall 1:1 из dumpfix: число стен не ограничено, реальное пробитие
-	-- решает Ballistics.trace по материалу/толщине/Penetration, а урон падает
-	-- через WallbangMultiplier. Прежний выученный wallPause только терял
-	-- валидные пробития, поэтому его здесь больше нет.
-	return 16
+	-- Число стен берётся из профиля оружия (его пишет weaponProfileFor в
+	-- config.maxWalls): AWP 4, винтовки 3, SMG/пистолеты 1, дробовики 1,
+	-- Zeus 0. Реальное пробитие всё равно решает Ballistics.trace по
+	-- материалу/толщине/Penetration, а урон падает через WallbangMultiplier.
+	local limit = tonumber(cap) or tonumber(config.maxWalls) or 3
+	return math.clamp(math.floor(limit + 0.5), 0, 4)
 end
 
 local velocities = setmetatable({}, { __mode = "k" })
 local lastRoots = setmetatable({}, { __mode = "k" })
 history = setmetatable({}, { __mode = "k" })
 Ballistics.history = history
-Ballistics.wallLimit, Ballistics.wallFails = {}, {}
+Ballistics.wallFails = {}
 Ballistics.blocked = setmetatable({}, { __mode = "k" })
 
 maid:give(runService.Heartbeat:Connect(function(delta)
@@ -3828,6 +3815,10 @@ function Rage.probeOrigin()
 		line("  Penetration: %s | Range: %s | Wallbang: %s | ArmorPen: %s | Bullets: %s",
 			tostring(properties.Penetration), tostring(properties.Range), tostring(properties.WallbangMultiplier),
 			tostring(properties.ArmorPenetration), tostring(properties.BulletsPerShot))
+		line("  FireRate: %s | RangeMod: %s | DamagePerPart: %s", tostring(properties.FireRate),
+			tostring(properties.RangeModifier),
+			type(properties.DamagePerPart) == "table"
+				and ("H" .. tostring(properties.DamagePerPart.Head) .. "/T" .. tostring(properties.DamagePerPart.Torso)) or "--")
 		line("  allowedWalls: %d | MaxWalls setting: %s | WallMinDamage: %s",
 			Ballistics.allowedWalls(weapon, Neverlose.config.rage.autowall),
 			tostring(Neverlose.config.rage.maxWalls), tostring(Neverlose.config.rage.wallMinDamage))
@@ -3891,6 +3882,11 @@ function Rage.probeOrigin()
 	end
 	line("rage: %s | probe log: %s | last fail: %s", tostring(Neverlose.config.rage.enabled),
 		tostring(Neverlose.config.rage.originProbeLog), tostring(Rage.lastFail or "none"))
+	-- Почему рейдж не стреляет прямо сейчас: видно без догадок.
+	if Rage.block then
+		line("  last block: %s (%d ms ago)", tostring(Rage.block.reason),
+			math.floor((os.clock() - (Rage.block.at or os.clock())) * 1000 + 0.5))
+	end
 	line("-- current target --")
 	if target and target.part and target.part.Parent then
 		local aim = Rage.aimPoint(target)
@@ -3898,16 +3894,17 @@ function Rage.probeOrigin()
 		local maxWalls = Ballistics.allowedWalls(weapon, Neverlose.config.rage.autowall)
 		if aim and distance > 0.1 then
 			local direction = (aim - origin).Unit
-			local _, reached, walls = Ballistics.trace(origin, direction, distance + 2, target.character, maxWalls)
-			line("  direct: %s | walls %d | %.1f st", reached and "visible" or "blocked", walls, distance)
+			local _, reached, walls, cost = Ballistics.trace(origin, direction, distance + 2, target.character, maxWalls)
+			-- pen = доля израсходованного лимита пробития: 0 чисто, 100 на грани.
+			line("  direct: %s | walls %d | %.1f st | pen %d%%", reached and "visible" or "blocked", walls, distance, math.floor((cost or 0) * 100 + 0.5))
 			local rank = Rage.originRank and Rage.originRank[target.entity]
 			if rank and rank.shifts and #rank.shifts > 0 then
 				for index = 1, math.min(#rank.shifts, 4) do
 					local shift = rank.shifts[index]
 					local from = origin + shift
 					local lineDir = aim - from
-					local _, fromReached, fromWalls = Ballistics.trace(from, lineDir.Unit, lineDir.Magnitude + 2, target.character, maxWalls)
-					line("  scan %.1f st: %s | walls %d", shift.Magnitude, fromReached and "visible" or "blocked", fromWalls)
+					local _, fromReached, fromWalls, fromCost = Ballistics.trace(from, lineDir.Unit, lineDir.Magnitude + 2, target.character, maxWalls)
+					line("  scan %.1f st: %s | walls %d | pen %d%%", shift.Magnitude, fromReached and "visible" or "blocked", fromWalls, math.floor((fromCost or 0) * 100 + 0.5))
 				end
 			else
 				line("  scan: no point cached (direct line open or too far)")
@@ -4430,8 +4427,8 @@ function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 	local distance = toAim.Magnitude
 	if distance < 0.5 then return nil end
 
-	local radius = math.clamp(tonumber(config.originRange) or 8, 1, 16)
-	local scans = math.clamp(math.floor(tonumber(config.originScans) or 4), 1, 12)
+	local radius = math.clamp(tonumber(config.originRange) or 8, 1, 12)
+	local scans = math.clamp(math.floor(tonumber(config.originScans) or 4), 1, 10)
 	local mode = config.originScanMode or "optimized"
 
 	radius = math.min(radius, math.max(distance * 0.85, 8.5))
@@ -4465,15 +4462,15 @@ function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 
 	local function wallsOk(count)
 		-- 1:1 из dumpfix: в скан-луче число стен не ограничивает, если
-		-- включён autowall/wallLimit; иначе нужен чистый луч.
-		return count <= 0 or config.autowall == true or (not Game.serverHits and config.wallLimit == true)
+		-- включён autowall; иначе нужен чистый луч.
+		return count <= 0 or config.autowall == true
 	end
 
 	local function lands(point)
 		local delta = aim - point
-		if delta.Magnitude < 0.05 then return true, 1 end
-		local hits, reached, count = Ballistics.trace(point, delta.Unit, rangeValue, character, math.huge, penValue)
-		return reached == true and wallsOk(count or 0), #hits
+		if delta.Magnitude < 0.05 then return true, 1, 0 end
+		local hits, reached, count, cost = Ballistics.trace(point, delta.Unit, rangeValue, character, math.huge, penValue)
+		return reached == true and wallsOk(count or 0), #hits, cost or 0
 	end
 
 	local function free(point)
@@ -4490,21 +4487,26 @@ function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 	local function test(point)
 		if entity and Rage.originPointBanned(entity, point) then return nil end
 		if mode == "precise" then
-			local ok, count = lands(point)
+			local ok, count, cost = lands(point)
 			if not (ok and count > 0) then return nil end
-			return free(point) and point or nil
+			return free(point) and point or nil, cost or 0
 		end
-		if clear(point) and free(point) then return point end
+		if clear(point) and free(point) then return point, 0 end
 		if useLand then
-			if lands(point) and free(point) then return point end
+			local ok, _, cost = lands(point)
+			if ok and free(point) then return point, cost or 0 end
 		end
 		return nil
 	end
 
 	if cache.character == character and cache.from and now - cache.at < 0.15 and (cache.from - from).Magnitude < 2 then
 		if cache.position then
-			if test(cache.position) then
+			local kept, cost = test(cache.position)
+			-- Точку с запасом (cost < 0.5) держим весь кэш; точку на грани —
+			-- не дольше 50 мс, чтобы искать лучшую, но не сканировать каждый кадр.
+			if kept and (cache.margin or now - (cache.marginAt or 0) < 0.05) then
 				cache.at = now
+				if (cost or 0) < 0.5 then cache.margin, cache.marginAt = true, now end
 				return cache.position
 			end
 		elseif cache.failed then
@@ -4521,15 +4523,28 @@ function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 	-- Bridge Filter: сначала ищем точку, до которой от реального origin нет
 	-- стены (сервер такие принимает стабильнее). Если таких нет — отдаём
 	-- первую найденную, чтобы скан не выключался в углу/коридоре.
-	local firstFound
-	local function prefer(point)
+	-- Milk: cost = доля израсходованного лимита пробития (0 чисто, 1 на грани).
+	-- Точка с запасом (< 0.5) приоритетнее точки на грани, даже если у той
+	-- меньше стен: сервер реже отклоняет такие выстрелы.
+	local firstFound, firstCost
+	local function prefer(point, cost)
 		if not point then return nil end
-		if Rage.originReachable(from, point) then return point end
-		firstFound = firstFound or point
+		cost = cost or 0
+		if Rage.originReachable(from, point) then
+			if cost < 0.5 then return point, cost end
+			if not firstFound or cost < (firstCost or 1) then firstFound, firstCost = point, cost end
+			return nil
+		end
+		if not firstFound then firstFound, firstCost = point, cost end
 		return nil
 	end
 
-	local found = prefer(test(from))
+	local function probe(point)
+		local candidate, cost = test(point)
+		return prefer(candidate, cost)
+	end
+
+	local found, foundCost = probe(from)
 	if not found then
 		local rings = { 0.35, 0.6, 0.8, 1 }
 		local steps = math.max(scans, 8)
@@ -4537,8 +4552,8 @@ function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 			local ringRadius = math.max(radius * rings[ringIndex], 1)
 			for step = 0, steps - 1 do
 				local angle = (step / steps) * 2 * math.pi
-				local candidate = prefer(test(from + (side * math.cos(angle) + up * math.sin(angle)) * ringRadius))
-				if candidate then found = candidate break end
+				local candidate, cost = probe(from + (side * math.cos(angle) + up * math.sin(angle)) * ringRadius)
+				if candidate then found, foundCost = candidate, cost break end
 			end
 			if found then break end
 		end
@@ -4546,7 +4561,12 @@ function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 
 	if not found then
 		local lift = math.min(radius * 0.5, 2.5)
-		found = prefer(test(from + Vector3.new(0, lift, 0))) or prefer(test(from - Vector3.new(0, lift, 0)))
+		local a, costA = probe(from + Vector3.new(0, lift, 0))
+		if a then found, foundCost = a, costA end
+		if not found then
+			local b, costB = probe(from - Vector3.new(0, lift, 0))
+			if b then found, foundCost = b, costB end
+		end
 	end
 
 	if not found then
@@ -4574,17 +4594,39 @@ function Rage.originScan(character, part, range, penetration, maxWalls, entity)
 			from - side * far * 1.35,
 		}
 		for index = 1, #points do
-			local candidate = prefer(test(points[index]))
-			if candidate then found = candidate break end
+			local candidate, cost = probe(points[index])
+			if candidate then found, foundCost = candidate, cost break end
 		end
 	end
 
 	found = found or firstFound
+	if found and foundCost == nil then foundCost = firstCost or 0 end
+
+	-- Milk: шаг слайда origin, когда запас меньше половины. Сдвигаем точку
+	-- вбок/вверх и берём вариант, где расход лимита пробития меньше.
+	if found and (foundCost or 0) >= 0.5 then
+		local step = math.max(radius * 0.35, 1)
+		local diagonal = (side + up).Unit
+		local slides = {
+			found + side * step, found - side * step,
+			found + up * step, found - up * step,
+			found + diagonal * step, found - diagonal * step,
+		}
+		for _, point in ipairs(slides) do
+			local candidate, cost = test(point)
+			if candidate and Rage.originReachable(from, candidate) and (cost or 0) < (foundCost or 1) - 0.05 then
+				found, foundCost = candidate, cost
+				if foundCost < 0.5 then break end
+			end
+		end
+	end
 
 	if found then
 		cache.character, cache.at, cache.from, cache.position, cache.failed = character, os.clock(), from, found, false
+		cache.margin, cache.marginAt = (foundCost or 0) < 0.5, os.clock()
 	else
 		cache.character, cache.at, cache.from, cache.position, cache.failed = character, os.clock(), from, nil, true
+		cache.margin = nil
 	end
 	return found
 end
@@ -5087,6 +5129,20 @@ function Rage.inReach(character, origin, range, fovPixels)
 	return true
 end
 
+-- Milk: сетка внутренних точек для Deep Sweep (доли размера части, внутри хитбокса).
+local SWEEP_GRID = {}
+do
+	local axis = { 0, -0.38, 0.38, -0.19, 0.19 }
+	for _, y in ipairs(axis) do
+		for _, x in ipairs(axis) do
+			for _, z in ipairs({ 0, -0.3, 0.3 }) do
+				SWEEP_GRID[#SWEEP_GRID + 1] = Vector3.new(x, y, z)
+			end
+		end
+	end
+end
+local SWEEP_PARTS = { "Head", "UpperTorso", "LowerTorso", "LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg" }
+
 function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 	local config = Neverlose.config.rage
 	local properties = weapon.Properties
@@ -5145,7 +5201,9 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 		if walls == 0 and damage < math.min(minDamage, health) then return nil end
 		-- Shooting through a wall is a last resort: it has to be worth the bullet.
 		if walls > 0 and not record then
-			local wallMin = tonumber(config.wallMinDamage) or 0
+			local wallMin = math.clamp(tonumber(config.wallMinDamage) or 0, 0, 20)
+			-- Milk: falloff уже режет урон на дальней дистанции, порог тает вместе с ней.
+			wallMin = wallMin * math.clamp(1.2 - distance / math.max(range, 1), 0.3, 1)
 			if damage < wallMin and damage < health then return nil end
 		end
 
@@ -5170,6 +5228,18 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 			if rootPart and (rootPart.Position - origin).Magnitude > maxDist then character = nil end
 			if character and not Game.isImmune(character) and Rage.inReach(character, origin, range, fovPixels) then
 				local bestAny, bestTorso, bestHead
+
+				-- Milk: цель, которую видит камера (прижался к стене или углу). Ей приоритет и x3 бюджет.
+				local seenByCam = false
+				if config.viewPriority ~= false then
+					local viewPart = character:FindFirstChild("Head") or character:FindFirstChild("UpperTorso")
+						or character:FindFirstChild("HumanoidRootPart")
+					if viewPart then seenByCam = Ballistics.visible(currentCamera.CFrame.Position, viewPart.Position, character) end
+				end
+				-- Wall Aggression: 100 = как раньше, ниже = меньше лучей и меньше времени на поиск.
+				local aggro = math.clamp((tonumber(config.wallAggro) or 100) / 100, 0, 1)
+				local effort = 0.08 + 0.92 * aggro * aggro
+				local boost = seenByCam and (1 + 2 * aggro) or 1
 				local partNames = partNames
 				if maxWalls > 0 and #partNames == 1 and PART_GROUP[partNames[1]] == "Head" then
 					local headPart = character:FindFirstChild(partNames[1])
@@ -5270,8 +5340,9 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 				-- Если выбранная точка всё ещё за стеной (или не нашлось ничего),
 				-- пробуем несколько точек в пределах хитбокса и берём ту, где
 				-- меньше стен. Multi Ray = сколько лучей всего (1..10).
-				local multiRays = math.clamp(math.floor(tonumber(config.multiRay) or 1), 1, 10)
-				if multiRays > 1 and (config.autowall or config.wallLimit) then
+				local multiRays = math.clamp(math.floor(tonumber(config.multiRay) or 1), 1, 16)
+				if multiRays > 2 then multiRays = math.max(2, math.floor(multiRays * (0.35 + 0.65 * aggro) + 0.5)) end
+				if multiRays > 1 and config.autowall then
 					local seedRecord = chosen and chosen.record or nil
 					local seedPart = chosen and chosen.part or character:FindFirstChild(partNames[1])
 					local seedPoint = chosen and chosen.position or (seedPart and seedPart.Position)
@@ -5287,19 +5358,19 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 							local smallest = math.min(seedPart.Size.X, seedPart.Size.Y, seedPart.Size.Z)
 							-- Wall Spot: радиус задаётся настройкой, но точка обязана
 							-- остаться на цели — иначе сервер просто не засчитает попадание.
-							local wanted = tonumber(config.spotRadius) or 0.6
-							local radius = math.clamp(wanted, 0.05, smallest * 0.35)
+							local wanted = math.clamp(tonumber(config.spotRadius) or 0.6, 0.2, 0.85)
+							local radius = math.clamp(wanted, 0.05, smallest * 0.45)
 							-- Два кольца: внутреннее ловит узкие окна, внешнее — края хитбокса.
 							-- При включённом Wall Spot всегда не меньше 4 точек, даже если
 							-- Multi Ray стоит 1–3: иначе «поиск» ничего не находит.
-							local rings = (config.spotFind ~= false) and 2 or 1
+							local rings = (config.spotFind ~= false) and 3 or 1
 							local total = math.max(multiRays - 1, (config.spotFind ~= false) and 4 or 1)
 							local perRing = math.max(1, math.ceil(total / rings))
 							local best = chosen
 							for ring = 1, rings do
 								local scale = ring / rings
 								for ray = 1, perRing do
-									local angle = ((ray - 1) / perRing) * math.pi * 2 + (ring == 2 and 0.5 / perRing * math.pi * 2 or 0)
+									local angle = ((ray - 1) / perRing) * math.pi * 2 + (ring % 2 == 0 and 0.5 / perRing * math.pi * 2 or 0)
 									local point = seedPoint + (side * math.cos(angle) + up * math.sin(angle)) * (radius * scale)
 									local other = evaluate(entity, character, seedPart, point, nil)
 									if other and (not best or (other.walls or 0) < (best.walls or 0)
@@ -5320,8 +5391,9 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 							if config.adaptiveRays ~= false and best and (best.walls or 0) > 0 and best.part and best.part.Parent then
 								local refinePoint = best.position or seedPoint
 								local refineRadius = math.max(radius * 0.4, 0.03)
-								for ray = 1, 8 do
-									local angle = (ray - 1) / 8 * math.pi * 2 + 0.19
+								local refineCount = math.max(4, math.floor(12 * (0.3 + 0.7 * aggro) + 0.5))
+								for ray = 1, refineCount do
+									local angle = (ray - 1) / refineCount * math.pi * 2 + 0.19
 									local point = refinePoint + (side * math.cos(angle) + up * math.sin(angle)) * refineRadius
 									local other = evaluate(entity, character, best.part, point, nil)
 									if other and ((other.walls or 0) < (best.walls or 0)
@@ -5339,10 +5411,97 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 					end
 				end
 
+				-- View Origin (Milk): камера видит цель, а выстрел с обычного origin закрыт.
+				-- Пробуем точки между origin и камерой и чуть дальше к цели: оттуда линия чистая.
+				-- Считаем сразу, без кэша, все части тела.
+				if seenByCam and config.wallHug ~= false and config.autowall and aggro > 0.05
+					and not (chosen and chosen.record) and (not chosen or (chosen.walls or 0) > 0) then
+					local camPos = currentCamera.CFrame.Position
+					local focusPart = character:FindFirstChild("Head") or character:FindFirstChild("UpperTorso")
+						or character:FindFirstChild("HumanoidRootPart")
+					local focus = chosen and chosen.position or (focusPart and focusPart.Position)
+					if focus and (focus - camPos).Magnitude > 1 then
+						local unit = (focus - camPos).Unit
+						local reachLimit = math.clamp(tonumber(config.originRange) or 8, 1, 12) + 1
+						local viewNames = { "Head", "UpperTorso", "LowerTorso", "LeftUpperLeg", "RightUpperLeg" }
+						local viewBest
+						local candidates = {
+							camPos, camPos + unit * 0.3, camPos + unit * 0.6,
+							origin:Lerp(camPos, 0.9) + unit * 0.3, origin:Lerp(camPos, 0.75),
+							origin:Lerp(camPos, 0.5), origin:Lerp(camPos, 0.25),
+						}
+						local viewStarted = os.clock()
+						local viewBudget = math.clamp(0.02 * effort, 0.0008, 0.02)
+						local candLimit = math.max(3, math.ceil(#candidates * (0.4 + 0.6 * aggro)))
+						local nameLimit = math.max(2, math.ceil(#viewNames * (0.4 + 0.6 * aggro)))
+						for candIndex, from in ipairs(candidates) do
+							if candIndex > candLimit or os.clock() - viewStarted > viewBudget then break end
+							if (from - origin).Magnitude <= reachLimit and Rage.originClear(from)
+								and Rage.originReachable(origin, from) then
+								for nameIndex, name in ipairs(viewNames) do
+									if nameIndex > nameLimit then break end
+									local part = character:FindFirstChild(name)
+									if part and part.Parent then
+										local viewed = evaluate(entity, character, part, part.Position, nil, from)
+										if viewed then
+											viewed.origin = from
+											if not viewBest or (viewed.walls or 0) < (viewBest.walls or 0)
+												or ((viewed.walls or 0) == (viewBest.walls or 0) and viewed.damage > viewBest.damage) then
+												viewBest = viewed
+											end
+										end
+									end
+								end
+								if viewBest and (viewBest.walls or 0) <= 0 then break end
+							end
+						end
+						if viewBest and (not chosen or (viewBest.walls or 0) <= (chosen.walls or 0)) then chosen = viewBest end
+					end
+				end
+
+				-- Deep Sweep (Milk): стена всё ещё мешает или цель не найдена. Прочёсываем
+				-- сеткой внутренних точек все основные части тела и берём путь с минимумом
+				-- стен и толщины. Бюджет по времени, чтобы кадр не просел.
+				if config.deepSweep ~= false and config.autowall and aggro > 0.05
+					and not (chosen and chosen.record) and (not chosen or (chosen.walls or 0) > 0) then
+					local started = os.clock()
+					local budget = math.clamp((tonumber(config.sweepBudget) or 6) * boost * effort / 1000, 0.0005, 0.04)
+					local limit = math.clamp(math.floor(tonumber(config.multiRay) or 4) * 10 * boost * effort, 16, 400)
+					local perPart = math.max(4, math.floor(limit / #SWEEP_PARTS))
+					local best = chosen
+					local finished = false
+
+					local function consider(other)
+						if not other then return end
+						if not best or (other.walls or 0) < (best.walls or 0)
+							or ((other.walls or 0) == (best.walls or 0) and (other.cost or 0) < (best.cost or 0) - 0.05)
+							or ((other.walls or 0) == (best.walls or 0)
+								and math.abs((other.cost or 0) - (best.cost or 0)) <= 0.05
+								and other.damage > best.damage) then
+							best = other
+						end
+					end
+
+					for _, name in ipairs(SWEEP_PARTS) do
+						if finished then break end
+						local sweepPart = character:FindFirstChild(name)
+						if sweepPart and sweepPart.Parent then
+							local size, cf = sweepPart.Size, sweepPart.CFrame
+							for index = 1, perPart do
+								local offset = SWEEP_GRID[((index - 1) * 7) % #SWEEP_GRID + 1]
+								consider(evaluate(entity, character, sweepPart, cf:PointToWorldSpace(size * offset), nil))
+								if best and (best.walls or 0) <= 0 then finished = true break end
+								if os.clock() - started > budget then finished = true break end
+							end
+						end
+					end
+					chosen = best
+				end
+
 				-- Wall Spot (слайд origin): если точка всё ещё за стеной, двигаем
 				-- сам origin вбок/вверх на 0.2–2 стада вдоль стены. Это ищет
 				-- тонкое место или щель, не трогая точку прицела.
-				if config.spotFind ~= false and (config.autowall or config.wallLimit) and chosen
+				if config.spotFind ~= false and config.autowall and chosen
 					and (chosen.walls or 0) > 0 and (chosen.cost or 0) >= 0.5 and not chosen.record then
 					local slidePart, slidePoint = chosen.part, chosen.position
 					if slidePart and slidePart.Parent and slidePoint then
@@ -5353,7 +5512,7 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 							if side.Magnitude < 0.01 then side = dir:Cross(Vector3.new(1, 0, 0)) end
 							side = side.Unit
 							local up = side:Cross(dir).Unit
-							local slide = math.clamp(tonumber(config.spotRadius) or 0.6, 0.2, 1.2)
+							local slide = math.clamp(tonumber(config.spotRadius) or 0.6, 0.2, 0.85)
 							local best = chosen
 							local function slideTo(from)
 								if not Rage.originClear(from) then return end
@@ -5366,11 +5525,163 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 									best = other
 								end
 							end
-							slideTo(origin + side * slide)
-							slideTo(origin - side * slide)
-							slideTo(origin + up * slide * 0.7)
-							slideTo(origin - up * slide * 0.7)
+							-- Milk: три шага сдвига и 8 направлений. Дальние шаги только по достижимому пути.
+							local dirs = {
+								side, -side, up * 0.7, -up * 0.7,
+								(side + up).Unit * 0.8, (side - up).Unit * 0.8,
+								(-side + up).Unit * 0.8, (-side - up).Unit * 0.8,
+							}
+							for index, scale in ipairs(aggro < 0.34 and { 1 } or (aggro < 0.67 and { 1, 2 } or { 1, 2, 3.2 })) do
+								local reach = math.min(slide * scale, 3.5)
+								for _, direction in ipairs(dirs) do
+									local from = origin + direction * reach
+									if index == 1 or Rage.originReachable(origin, from) then slideTo(from) end
+									if (best.walls or 0) <= 0 then break end
+								end
+								if (best.walls or 0) <= 0 then break end
+							end
 							chosen = best
+						end
+					end
+				end
+
+				-- Wall Hug v3 (Milk): origin вплотную к стене + Edge Clip.
+				-- Сервер режет пулю по накопленной толщине на материал. У твёрдых материалов лимит
+				-- меньше стада, проходят только кромки и углы. Ищем origin, при котором луч обходит
+				-- блок или цепляет только край. Работает и когда обычный скан ничего не нашёл.
+				if config.wallHug ~= false and config.autowall and aggro > 0.05
+					and not (chosen and chosen.record) and (not chosen or (chosen.walls or 0) > 0) then
+					local seedPart = chosen and chosen.part or nil
+					if not (seedPart and seedPart.Parent) then
+						seedPart = nil
+						for _, name in ipairs({ "UpperTorso", "Head", "LowerTorso" }) do
+							seedPart = character:FindFirstChild(name)
+							if seedPart then break end
+						end
+					end
+					if seedPart and seedPart.Parent then
+						local started = os.clock()
+						local budget = math.clamp((tonumber(config.hugBudget) or 6) * boost * effort / 1000, 0.0005, 0.036)
+						local seedPoint = chosen and chosen.position or seedPart.Position
+						local baseFrom = chosen and chosen.origin or origin
+						local gap = math.clamp(tonumber(config.hugGap) or 0.4, 0.15, 1)
+						local reachLimit = math.clamp(tonumber(config.originRange) or 8, 1, 12) + 1
+						local step = math.clamp(tonumber(config.spotRadius) or 0.6, 0.3, 0.85)
+						local baseLine = seedPoint - baseFrom
+						local dist = baseLine.Magnitude
+						if dist > 1 then
+							local dir = baseLine.Unit
+							local side = dir:Cross(Vector3.new(0, 1, 0))
+							if side.Magnitude < 0.01 then side = dir:Cross(Vector3.new(1, 0, 0)) end
+							side = side.Unit
+							local up = side:Cross(dir).Unit
+							local hugBest
+							local tried = {}
+							local partOrder = { seedPart.Name, "Head", "UpperTorso", "LowerTorso" }
+							-- смещения origin в плоскости, перпендикулярной линии: { вбок, вверх } в стадах
+							local probes = { { 0, 0 } }
+
+							-- Кромки блока в плоскости origin: куда сдвинуть origin, чтобы луч прошёл
+							-- по краю блока (внутри на inset) или мимо него (inset < 0).
+							local function addEdges(blocker)
+								local cf, size = blocker.CFrame, blocker.Size
+								local minS, maxS, minU, maxU = math.huge, -math.huge, math.huge, -math.huge
+								local valid = 0
+								for sx = -1, 1, 2 do
+									for sy = -1, 1, 2 do
+										for sz = -1, 1, 2 do
+											local corner = cf:PointToWorldSpace(Vector3.new(sx * size.X, sy * size.Y, sz * size.Z) * 0.5)
+											local w = corner - baseFrom
+											local f = w:Dot(dir) / dist
+											if f > 0.02 and f < 0.97 then
+												local k = 1 / (1 - f)
+												local s, u = w:Dot(side) * k, w:Dot(up) * k
+												minS, maxS = math.min(minS, s), math.max(maxS, s)
+												minU, maxU = math.min(minU, u), math.max(maxU, u)
+												valid += 1
+											end
+										end
+									end
+								end
+								if valid < 4 then return end
+								for _, inset in ipairs({ -0.3, 0.15, 0.4 }) do
+									probes[#probes + 1] = { maxS - inset, 0 }
+									probes[#probes + 1] = { minS + inset, 0 }
+									probes[#probes + 1] = { 0, maxU - inset }
+									probes[#probes + 1] = { 0, minU + inset }
+								end
+							end
+
+							local preHits = Ballistics.trace(baseFrom, dir, dist + 2, character, 16)
+							local seenBlockers, blockerCount = {}, 0
+							for _, hit in ipairs(preHits) do
+								local blocker = hit.Instance
+								if not hit.Exit and blocker and not seenBlockers[blocker] and not blocker:IsDescendantOf(character) then
+									seenBlockers[blocker] = true
+									addEdges(blocker)
+									blockerCount += 1
+									if blockerCount >= 3 then break end
+								end
+							end
+
+							for _, grid in ipairs({
+								{ step, 0 }, { -step, 0 }, { 0, step * 0.8 }, { 0, -step * 0.8 },
+								{ step * 2, 0 }, { -step * 2, 0 }, { step, step * 0.8 }, { -step, step * 0.8 },
+								{ step, -step * 0.8 }, { -step, -step * 0.8 }, { step * 3, 0 }, { -step * 3, 0 },
+							}) do
+								probes[#probes + 1] = grid
+							end
+
+							local function hugBetter(other)
+								if not hugBest then return true end
+								if (other.walls or 0) ~= (hugBest.walls or 0) then return (other.walls or 0) < (hugBest.walls or 0) end
+								if math.abs((other.cost or 0) - (hugBest.cost or 0)) > 0.05 then return (other.cost or 0) < (hugBest.cost or 0) end
+								return other.damage > hugBest.damage
+							end
+
+							local function tryCandidate(point)
+								for _, seen in ipairs(tried) do
+									if (seen - point).Magnitude < 0.15 then return end
+								end
+								if (point - origin).Magnitude > reachLimit or not Rage.originClear(point)
+									or not Rage.originReachable(origin, point) then return end
+								tried[#tried + 1] = point
+								for _, name in ipairs(partOrder) do
+									local part = character:FindFirstChild(name)
+									if part and part.Parent then
+										local aimPoint = (part == seedPart) and seedPoint or part.Position
+										local hugged = evaluate(entity, character, part, aimPoint, nil, point)
+										if hugged then
+											hugged.origin = point
+											if hugBetter(hugged) then hugBest = hugged end
+										end
+									end
+								end
+							end
+
+							for _, probe in ipairs(probes) do
+								if os.clock() - started > budget then break end
+								local moved = probe[1] ~= 0 or probe[2] ~= 0
+								if math.sqrt(probe[1] * probe[1] + probe[2] * probe[2]) <= reachLimit then
+									local start = baseFrom + side * probe[1] + up * probe[2]
+									local toSeed = seedPoint - start
+									if toSeed.Magnitude > 1 and (not moved or Rage.originClear(start)) then
+										-- сама сдвинутая точка: так обходится блок целиком
+										if moved then tryCandidate(start) end
+										local probeHits = Ballistics.trace(start, toSeed.Unit, toSeed.Magnitude + 2, character, 16)
+										local first = probeHits[1]
+										if first and not first.Exit and not first.Instance:IsDescendantOf(character) then
+											tryCandidate(first.Position - toSeed.Unit * gap)
+										end
+									end
+								end
+								if hugBest and (hugBest.walls or 0) <= 0 then break end
+							end
+
+							-- Прижатый origin предпочитаем при равном числе стен: сервер регает его лучше.
+							if hugBest and (not chosen or (hugBest.walls or 0) <= (chosen.walls or 0)) then
+								chosen = hugBest
+							end
 						end
 					end
 				end
@@ -5398,8 +5709,12 @@ function Rage.scanAll(weapon, partNames, multipointSet, fovDegrees)
 					-- царапину по открытой цели, иначе автоволл бесполезен.
 					-- Shitaro: живая открытая цель важнее выстрела по последней
 					-- запомненной позиции — история не должна перебивать видимого.
+					if seenByCam then score -= 200 end
 					if chosen.record then score += 1500 end
-					if (chosen.walls or 0) > 0 then score += 100000 + (chosen.cost or 0) * 5 end
+					if (chosen.walls or 0) > 0 then
+						if chosen.damage >= chosen.health then score += (chosen.cost or 0) * 5
+						else score += (seenByCam and 20000 or 100000) + (chosen.cost or 0) * 5 end
+					end
 					if config.stickyTarget and Rage.stickyEntity == entity and os.clock() - (Rage.stickyAt or 0) < 0.5 then score -= 1e6 end
 					chosen.score = score
 					results[#results + 1] = chosen
@@ -5498,6 +5813,21 @@ function Rage.aimBullet(bullet, target, weapon)
 	local maxWalls = Ballistics.allowedWalls(weapon, Neverlose.config.rage.autowall)
 	local range = weapon and weapon.Properties and weapon.Properties.Range or 500
 
+	-- Скан буквально только что проверил ровно эту точку из этой точки (тот же
+	-- локальный оффсет, без ведения). В игре с серверной регистрацией попаданий
+	-- повторная трассировка ничего не добавляет — только отнимает миллисекунды
+	-- между «увидел» и «улетело». Поэтому для свежего скана стреляем сразу.
+	local preValidated = Game.serverHits and target.scanAt and (os.clock() - target.scanAt) < 0.008
+		and ((target.walls or 0) == 0 or target.noLead) and not target.record
+		and lead.Magnitude < 0.05 and not predicted
+	local function quick()
+		local from = target.origin or real
+		local offset = aim - from
+		local distance = offset.Magnitude
+		if distance < 0.05 or distance > range then return nil end
+		return { from = from, direction = offset.Unit, hits = {}, reached = true, walls = target.walls or 0, cost = target.cost or 0 }
+	end
+
 	local function attempt(from)
 		local offset = aim - from
 		local distance = offset.Magnitude
@@ -5505,12 +5835,12 @@ function Rage.aimBullet(bullet, target, weapon)
 		local direction = offset.Unit
 
 		Ballistics.safe = true
-		local hits, reached, walls = Ballistics.trace(from, direction, distance + 2, target.character, maxWalls)
+		local hits, reached, walls, cost = Ballistics.trace(from, direction, distance + 2, target.character, maxWalls)
 		local relaxed = false
 		-- The predicted point may sit just outside the rig we see; the server decides the hit, so a clear line is enough.
 		if not reached and predicted and Game.serverHits then
 			local _, _, blockers = Ballistics.traceRaw(from, direction, distance, nil, 0)
-			if blockers == 0 then reached, walls, relaxed = true, 0, true end
+			if blockers == 0 then reached, walls, relaxed, cost = true, 0, true, 0 end
 		end
 		Ballistics.safe = false
 		if not reached and not (target.record and walls <= maxWalls) then return nil end
@@ -5524,7 +5854,22 @@ function Rage.aimBullet(bullet, target, weapon)
 				if not innerReached then return nil end
 			end
 		end
-		return { from = from, direction = direction, hits = hits, reached = reached, walls = walls }
+		return { from = from, direction = direction, hits = hits, reached = reached, walls = walls, cost = cost or 0 }
+	end
+
+	-- Milk: из двух путей (камера/смещённый origin) берём тот, где больше
+	-- запас по лимиту пробития (cost < 0.5), и только потом — где меньше стен.
+	local function marginOf(candidate)
+		return candidate ~= nil and (candidate.cost or 0) < 0.5
+	end
+	local function better(a, b)
+		if not a then return b end
+		if not b then return a end
+		local aSafe, bSafe = marginOf(a), marginOf(b)
+		if aSafe ~= bSafe then return aSafe and a or b end
+		local aw, bw = a.walls or 0, b.walls or 0
+		if aw ~= bw then return aw < bw and a or b end
+		return (a.cost or 0) < (b.cost or 0) and a or b
 	end
 
 	-- Смещённый origin — приоритет, но не единственный вариант. Кэш точки
@@ -5537,15 +5882,12 @@ function Rage.aimBullet(bullet, target, weapon)
 		-- тогда, когда прямой путь перекрыт, иначе смысл скана теряется.
 		local shiftedOrigin = target.origin
 		if shiftedOrigin then
-			local shifted = attempt(shiftedOrigin)
-			if shifted and (not found or not found.reached or (shifted.walls or 0) < (found.walls or 0)) then
-				found = shifted
-			end
+			found = better(found, attempt(shiftedOrigin))
 		end
 		if not found and requested ~= real then found = attempt(real) end
 		return found
 	end
-	local best = find()
+	local best = preValidated and quick() or find()
 	if not best and leadArm then
 		aim, leadArm = aim0 + (predicted or Vector3.zero), nil
 		best = find()
@@ -5634,8 +5976,18 @@ end)
 
 function Rage.shiftedTick(weapon)
 	local viewTick = Game.viewTick()
-	if type(viewTick) ~= "number" then return nil end
 	local now = os.clock()
+	if type(viewTick) == "number" then
+		Rage.lastViewTick, Rage.lastViewTickAt = viewTick, now
+	elseif Rage.lastViewTick and now - (Rage.lastViewTickAt or 0) < 0.2 then
+		-- Router иногда не отвечает один тик. Раньше выстрел в этот момент
+		-- просто отменялся («view tick unavailable») — рейдж молчал ровно
+		-- в важный момент. Берём последний валидный тик (не старше 0.2 с).
+		viewTick = Rage.lastViewTick
+	else
+		Rage.block = { reason = "view tick unavailable", at = now }
+		return nil
+	end
 	local early = math.max((weapon.Properties.FireRate or 0.1) - (now - (Rage.lastDirectAt or 0)), 0)
 	Rage.lastDirectAt = now
 	local config = Neverlose.config.rage
@@ -5673,6 +6025,10 @@ function Rage.remoteFire(weapon, target, tap)
 		return false
 	end
 	local bullets = {}
+	-- Milk: сервер режет ShootWeapon до 20 пакетов в секунду. Чаще слать
+	-- бессмысленно — пакет просто отбрасывается, поэтому держим 50 мс.
+	local sendAt = os.clock()
+	if sendAt - (Rage.lastSendAt or 0) < 0.05 then Rage.lastFail = "packet rate 20/s" return false end
 	for _ = 1, math.max(weapon.Properties.BulletsPerShot or 1, 1) do
 		local bullet = { Origin = Game.origin() }
 		if not Rage.aimBullet(bullet, target, weapon) then Rage.lastFail = "aim point blocked or out of range" return false end
@@ -5688,6 +6044,7 @@ function Rage.remoteFire(weapon, target, tap)
 		ViewTick = shotTick,
 	})
 	if not ok then Rage.lastFail = "send failed" return false end
+	Rage.lastSendAt = sendAt
 	Rage.lastFail = nil
 	Neverlose.stats = Neverlose.stats or {}
 	Neverlose.stats.shots = (Neverlose.stats.shots or 0) + 1
@@ -5820,6 +6177,23 @@ function Rage.remoteReload(weapon)
 	return ok
 end
 
+-- Пустой магазин = рейдж молчит: weaponReady false, и дальше него дело не
+-- доходит. Перезаряжаемся сами (серверная перезарядка, если она включена,
+-- иначе обычная), с антидребезгом, чтобы не спамить.
+function Rage.tryReload(weapon)
+	local config = Neverlose.config.rage
+	local now = os.clock()
+	if weapon.IsReloading then return end
+	if now - (Rage.reloadAsked or 0) < 0.35 then return end
+	Rage.reloadAsked = now
+	if config.autoReload and config.remoteReload and Rage.remoteReload(weapon) then return true end
+	if type(weapon.reload) == "function" then
+		task.spawn(pcall, weapon.reload, weapon)
+		return true
+	end
+	return false
+end
+
 do
 	local animationClass = Game.modules.animation
 	if animationClass and type(animationClass.play) == "function" then
@@ -5860,37 +6234,92 @@ end))
 ---Автопрофили под оружие: каждому стволу свои Range/Scans/Multi Ray/Spot/
 ---Min Damage. Настраивать вручную не нужно — при смене оружия значения
 ---применяются сами, а профиль запоминается в конфиге по имени/Identifier.
+---Параметры оружия из дампа Database/Custom/Weapons (19.11). Живые значения
+---берутся из weapon.Properties; эта таблица — запасной источник, если игра
+---ещё не отдала модуль (или поле отсутствует). По ней же считаются профили.
+Rage.WEAPON_STATS = {
+	["AK-47"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.75, ArmorPenetration = 0.775, FireRate = 0.1, BulletsPerShot = 1, Head = 143, Torso = 44 },
+	["AUG"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.7, ArmorPenetration = 0.9, FireRate = 0.1, BulletsPerShot = 1, Head = 101, Torso = 36 },
+	["AWP"] = { Penetration = 0.9, Range = 1200, RangeModifier = 0.99, WallbangMultiplier = 0.98, ArmorPenetration = 0.975, FireRate = 1.46, BulletsPerShot = 1, Head = 459, Torso = 143 },
+	["Desert Eagle"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.81, WallbangMultiplier = 0.8, ArmorPenetration = 0.932, FireRate = 0.225, BulletsPerShot = 1, Head = 250, Torso = 75 },
+	["Dual Berettas"] = { Penetration = 0.14, Range = 1200, RangeModifier = 0.85, WallbangMultiplier = 0.4, ArmorPenetration = 0.575, FireRate = 0.12, BulletsPerShot = 1, Head = 152, Torso = 47 },
+	["FAMAS"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.6, ArmorPenetration = 0.7, FireRate = 0.1, BulletsPerShot = 1, Head = 120, Torso = 37 },
+	["Five-SeveN"] = { Penetration = 0.14, Range = 1200, RangeModifier = 0.85, WallbangMultiplier = 0.35, ArmorPenetration = 0.85, FireRate = 0.15, BulletsPerShot = 1, Head = 120, Torso = 39 },
+	["Galil AR"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.6, ArmorPenetration = 0.775, FireRate = 0.09, BulletsPerShot = 1, Head = 120, Torso = 37 },
+	["Glock-18"] = { Penetration = 0.14, Range = 1200, RangeModifier = 0.85, WallbangMultiplier = 0.35, ArmorPenetration = 0.473, FireRate = 0.15, BulletsPerShot = 1, Head = 118, Torso = 37 },
+	["M4A1-S"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.94, WallbangMultiplier = 0.7, ArmorPenetration = 0.75, FireRate = 0.1, BulletsPerShot = 1, Head = 133, Torso = 38 },
+	["M4A4"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.7, ArmorPenetration = 0.7, FireRate = 0.09, BulletsPerShot = 1, Head = 131, Torso = 42 },
+	["MAC-10"] = { Penetration = 0, Range = 1200, RangeModifier = 0.8, WallbangMultiplier = 0.6, ArmorPenetration = 0.575, FireRate = 0.075, BulletsPerShot = 1, Head = 114, Torso = 35 },
+	["MP9"] = { Penetration = 0, Range = 1200, RangeModifier = 0.87, WallbangMultiplier = 0.6, ArmorPenetration = 0.575, FireRate = 0.07, BulletsPerShot = 1, Head = 104, Torso = 32 },
+	["Negev"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.93, WallbangMultiplier = 0.6, ArmorPenetration = 0.75, FireRate = 0.075, BulletsPerShot = 1, Head = 115, Torso = 36 },
+	["Nova"] = { Penetration = 0, Range = 120, RangeModifier = 0.7, WallbangMultiplier = 0.5, ArmorPenetration = 0.5, FireRate = 0.88, BulletsPerShot = 9, Head = 106, Torso = 34 },
+	["P250"] = { Penetration = 0.14, Range = 1200, RangeModifier = 0.9, WallbangMultiplier = 0.35, ArmorPenetration = 0.64, FireRate = 0.15, BulletsPerShot = 1, Head = 151, Torso = 47 },
+	["P90"] = { Penetration = 0, Range = 1200, RangeModifier = 0.87, WallbangMultiplier = 0.6, ArmorPenetration = 0.69, FireRate = 0.07, BulletsPerShot = 1, Head = 103, Torso = 32 },
+	["Tec-9"] = { Penetration = 0.14, Range = 1200, RangeModifier = 0.79, WallbangMultiplier = 0.35, ArmorPenetration = 0.9, FireRate = 0.12, BulletsPerShot = 1, Head = 119, Torso = 37 },
+	["SG 553"] = { Penetration = 0.65, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.7, ArmorPenetration = 1, FireRate = 0.1, BulletsPerShot = 1, Head = 133, Torso = 38 },
+	["SSG 08"] = { Penetration = 0.9, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.98, ArmorPenetration = 0.85, FireRate = 1.25, BulletsPerShot = 1, Head = 315, Torso = 99 },
+	["XM1014"] = { Penetration = 0.14, Range = 120, RangeModifier = 0.7, WallbangMultiplier = 0.5, ArmorPenetration = 0.8, FireRate = 0.35, BulletsPerShot = 6, Head = 82, Torso = 26 },
+	["USP-S"] = { Penetration = 0.14, Range = 1200, RangeModifier = 0.91, WallbangMultiplier = 0.4, ArmorPenetration = 0.505, FireRate = 0.17, BulletsPerShot = 1, Head = 140, Torso = 43 },
+	["MAG-7"] = { Penetration = 0.14, Range = 120, RangeModifier = 0.45, WallbangMultiplier = 0.5, ArmorPenetration = 0.75, FireRate = 0.88, BulletsPerShot = 8, Head = 122, Torso = 38 },
+	["Zeus x27"] = { Penetration = 0.14, Range = 13.584, RangeModifier = 0.011416, WallbangMultiplier = 0, ArmorPenetration = 1, FireRate = 0.15, BulletsPerShot = 1, Head = 500, Torso = 500 },
+	["Sawed-Off"] = { Penetration = 0.14, Range = 120, RangeModifier = 0.5, WallbangMultiplier = 0.5, ArmorPenetration = 0.7, FireRate = 0.8, BulletsPerShot = 8, Head = 125, Torso = 42 },
+	["R8 Revolver"] = { Penetration = 0.14, Range = 1200, RangeModifier = 0.98, WallbangMultiplier = 0.8, ArmorPenetration = 0.92, FireRate = 0.706, BulletsPerShot = 1, Head = 256, Torso = 86 },
+}
+
 function Rage.weaponProfileFor(weapon)
 	local config = Neverlose.config.rage
 	local profiles = config.weaponProfiles
 	if type(profiles) ~= "table" then profiles = {} config.weaponProfiles = profiles end
 	local key = weapon and (weapon.Identifier or weapon.Name)
 	if type(key) ~= "string" or key == "" then return nil end
-	local profile = profiles[key]
+	-- Версия профилей: при смене формулы старые кэши не используются.
+	local cacheKey = key .. "|milk2"
+	local profile = profiles[cacheKey]
 	if profile then return profile, key end
 
+	local stats = Rage.WEAPON_STATS[weapon.Name or key] or Rage.WEAPON_STATS[key]
 	local properties = weapon.Properties or {}
 	local perPart = properties.DamagePerPart
-	local head = type(perPart) == "table" and tonumber(perPart.Head) or nil
-	local body = type(perPart) == "table" and tonumber(perPart.Torso) or nil
-	local damage = head or body or tonumber(properties.Damage) or 20
-	local bullets = tonumber(properties.BulletsPerShot) or 1
-	local pen = tonumber(properties.Penetration) or 0
-	local rate = tonumber(properties.FireRate) or 0.1
-
-	-- Базовый профиль — винтовка.
-	profile = { originRange = 7, originScans = 4, multiRay = 4, spotRadius = 0.55, minDamage = 15, wallMinDamage = 20, maxWalls = 2 }
-	if bullets > 1 then
-		-- Дробовик: за стену почти не стреляем, скан короткий.
-		profile = { originRange = 5, originScans = 3, multiRay = 3, spotRadius = 0.5, minDamage = 10, wallMinDamage = 0, maxWalls = 1 }
-	elseif damage >= 55 or rate >= 0.5 then
-		-- Снайперка/AWP: длинный скан, толстые стены, высокий порог урона.
-		profile = { originRange = 9, originScans = 6, multiRay = 6, spotRadius = 0.6, minDamage = 30, wallMinDamage = 40, maxWalls = 3 }
-	elseif damage < 22 or pen < 0.35 then
-		-- Пистолет / слабое пробитие: лучше стрелять в открытую, чем в стену.
-		profile = { originRange = 5, originScans = 3, multiRay = 3, spotRadius = 0.5, minDamage = 10, wallMinDamage = 0, maxWalls = 1 }
+	local function field(name)
+		local value = tonumber(properties[name])
+		if value == nil and stats then value = tonumber(stats[name]) end
+		return value
 	end
-	profiles[key] = profile
+
+	local pen = field("Penetration") or 0
+	local wb = field("WallbangMultiplier") or 0.5
+	local bullets = field("BulletsPerShot") or 1
+	local rate = field("FireRate") or 0.1
+	local head = (type(perPart) == "table" and tonumber(perPart.Head)) or (stats and stats.Head) or 0
+	local torso = (type(perPart) == "table" and tonumber(perPart.Torso)) or (stats and stats.Torso) or field("Damage") or 40
+
+	-- Milk: профиль считается из реальных параметров ствола (дамп оружия),
+	-- а не «на глаз». Penetration + WallbangMultiplier задают, сколько стен
+	-- вообще имеет смысл простреливать, темп и урон — скан и пороги.
+	local maxWalls
+	if wb <= 0 then
+		maxWalls = 0
+	elseif bullets > 1 then
+		maxWalls = 1
+	else
+		maxWalls = math.clamp(1 + math.floor(pen * 2 + (wb - 0.5) * 3), 1, 4)
+	end
+
+	local wallMin = math.clamp(math.floor(wb * 18 + 0.5), 0, 20)
+	if bullets > 1 or pen < 0.2 then wallMin = math.min(wallMin, 5) end
+
+	profile = {
+		originRange = math.floor(math.clamp(6 + pen * 6 + (rate >= 0.2 and 1 or 0), 5, 12) * 10 + 0.5) / 10,
+		originScans = math.clamp((pen >= 0.85 and 8 or pen >= 0.6 and 6 or 4) + (rate >= 0.2 and 1 or 0), 3, 10),
+		multiRay = math.clamp((pen >= 0.85 and 14 or pen >= 0.6 and 10 or bullets > 1 and 5 or 6) + (rate >= 0.2 and 2 or 0), 4, 16),
+		spotRadius = math.floor(math.clamp(0.5 + pen * 0.35, 0.4, 0.85) * 100 + 0.5) / 100,
+		minDamage = math.clamp(math.floor(torso * 0.3 + 0.5), 8, 30),
+		wallMinDamage = wallMin,
+		maxWalls = maxWalls,
+	}
+	-- Снайперский хедшот: смысл ждать есть только при высоком уроне.
+	if head >= 300 then profile.minDamage = math.max(profile.minDamage, 25) end
+	profiles[cacheKey] = profile
 	return profile, key
 end
 
@@ -5901,7 +6330,10 @@ Rage.manual = Rage.manual or {}
 
 function Rage.applyWeaponProfile(weapon)
 	local config = Neverlose.config.rage
-	if config.weaponProfilesOn == false then Rage.profileKey = nil return end
+	local profilesOn = config.weaponProfilesOn ~= false
+	local originAuto = config.originFields ~= "Manual"
+	-- Milk: Range & Scans в режиме Auto ведёт профиль оружия, даже если общий Weapon Profiles выключен.
+	if not profilesOn and not originAuto then Rage.profileKey = nil return end
 	if not weapon then return end
 	local key = weapon.Identifier or weapon.Name
 	if type(key) ~= "string" or key == "" or key == Rage.profileKey then return end
@@ -5912,7 +6344,8 @@ function Rage.applyWeaponProfile(weapon)
 	if type(manual) ~= "table" then manual = {} config.manualFields = manual end
 	local changed = false
 	for name, value in pairs(profile) do
-		if not manual[name] and config[name] ~= value then
+		local allowed = profilesOn or (originAuto and (name == "originRange" or name == "originScans"))
+		if allowed and not manual[name] and config[name] ~= value then
 			config[name] = value
 			changed = true
 		end
@@ -5920,6 +6353,7 @@ function Rage.applyWeaponProfile(weapon)
 	if changed then
 		Logs.push("Combat", ("weapon profile · {%s} · Range %s · Min Damage %s · Multi Ray %s"):format(
 			tostring(weapon.Name or key), tostring(profile.originRange), tostring(profile.minDamage), tostring(profile.multiRay)))
+		if Rage.syncOriginUi then pcall(Rage.syncOriginUi) end
 	end
 end
 
@@ -5931,6 +6365,21 @@ maid:give(runService.Heartbeat:Connect(function()
 	local weapon = Game.weapon()
 	if weapon then pcall(Rage.applyWeaponProfile, weapon) end
 end))
+
+-- Есть ли вообще враг в радиусе/FOV: дешёвая проверка без трассировки. Нужна,
+-- чтобы не запускать скан «всё тело» тогда, когда в поле никого нет.
+function Rage.anyInReach(weapon, config)
+	local origin = Game.origin()
+	local range = weapon and weapon.Properties and weapon.Properties.Range or 500
+	local fovPixels = (tonumber(config.fov) or 180) >= 180 and math.huge or fovToPixels(config.fov)
+	for _, entity in ipairs(Game.entities()) do
+		if Game.isEnemy(entity, true) then
+			local character = Game.character(entity)
+			if character and not Game.isImmune(character) and Rage.inReach(character, origin, range, fovPixels) then return true end
+		end
+	end
+	return false
+end
 
 function Rage.refresh(weapon, config)
 	if weapon then pcall(Rage.applyWeaponProfile, weapon) end
@@ -5953,21 +6402,30 @@ function Rage.refresh(weapon, config)
 		interval = math.min(interval, 1 / 240)
 		if scanMs > 0.4 then interval = math.max(interval, scanMs * 0.6 / 1000) end
 	else
-		-- Видимая цель уже в списке — не даём сохранённой настройке Scan Rate
-		-- тормозить реакцию: пока враг открыт, пересканируем минимум на 120 Гц.
-		-- Это только частота перепроверки, логика выбора цели та же.
-		for index = 1, #Rage.targets do
-			if (Rage.targets[index].walls or 0) == 0 then
-				interval = math.min(interval, 1 / 120)
-				if scanMs > 0.4 then interval = math.max(interval, scanMs * 0.6 / 1000) end
-				break
-			end
-		end
+		-- Цель уже в списке (открытая ИЛИ через стену) — сохранённая настройка
+		-- Scan Rate больше не тормозит реакцию: пересканируем минимум на 120 Гц,
+		-- чтобы новое пробитие ловилось в ближайшем кадре. Защита кадра остаётся.
+		interval = math.min(interval, 1 / 120)
+		-- Wall Aggression ниже 100: при автоволле пересканируем реже.
+		local aggro = math.clamp((tonumber(config.wallAggro) or 100) / 100, 0, 1)
+		if config.autowall and aggro < 1 then interval = interval / (0.3 + 0.7 * aggro) end
+		if scanMs > 0.4 then interval = math.max(interval, scanMs * 0.6 / 1000) end
 	end
 	if now - Rage.lastScan >= interval then
 		Rage.lastScan = now
 		local scanStart = os.clock()
 		local results = Rage.scanAll(weapon, hitboxParts(config.hitboxList, config.hitboxes), setFromSet(hitboxParts(config.multipointList, config.multipoint, true)), config.fov)
+		-- Настроенные хитбоксы могут не найтись (враг выставил из-за угла только
+		-- ногу/руку) — раньше на этом цель просто исчезала и рейдж молчал.
+		-- Пробуем всё тело: такие выстрелы идут с меньшим приоритетом, но не
+		-- теряются. Не чаще 20 раз в секунду, чтобы не жечь CPU впустую.
+		if #results == 0 and now - (Rage.fallbackAt or 0) >= 0.05 and Rage.anyInReach(weapon, config) then
+			Rage.fallbackAt = now
+			local extra = Rage.scanAll(weapon, BODY_PARTS, setFromSet(hitboxParts(config.multipointList, config.multipoint, true)), config.fov)
+			for _, entry in ipairs(extra) do entry.score = (entry.score or 0) + 3000 end
+			results = extra
+		end
+		for _, entry in ipairs(results) do entry.scanAt = now end
 		local scanTime = (os.clock() - scanStart) * 1000
 		local st = Neverlose.stats or {}
 		Neverlose.stats = st
@@ -6069,15 +6527,26 @@ Events.on("kill", function(_, shot) pcall(logHit, shot, nil) end)
 
 local function rageStep()
 	local config = Neverlose.config.rage
+	local function hold(reason)
+		Rage.block = { reason = reason, at = os.clock() }
+		return true
+	end
 	Rage.target, Rage.stopping, Rage.shooting = nil, false, false
 	if not config.enabled or Game.isChatting() or not Game.localCharacter() then
 		Rage.stable = 0
 		Rage.targets = {}
+		hold(config.enabled and "chat/local character" or "rage disabled")
 		return
 	end
 
 	local weapon = Game.weapon()
-	if not (weapon and weapon.Bullet and weapon.Properties) then return end
+	if not (weapon and weapon.Bullet and weapon.Properties) then return hold("no weapon") end
+	-- Пустой магазин — самая обидная причина молчания: weaponReady false, и
+	-- рейдж выходил, ничего не делая. Перезаряжаемся вместо тишины.
+	if (weapon.Rounds or 0) <= 0 then
+		Rage.tryReload(weapon)
+		return hold("out of ammo")
+	end
 
 	local targets = Rage.refresh(weapon, config)
 	local target = targets[1]
@@ -6129,7 +6598,29 @@ local function rageStep()
 		fastOpen = openNow and (target.walls or 0) == 0 and not target.record and config.visFast ~= false
 			and (target.damage or 0) >= math.max(config.minDamage or 0, 1)
 	end
-	if not (target and config.autoFire and Game.weaponReady(weapon)) then return end
+	-- Новое пробитие: стена стала тоньше / открылся угол / цель только что
+	-- нашлась «через стену». Это новый шанс — не ждём стабильности и полного
+	-- Hit Chance, стреляем в тот же тик, пока линия не закрылась.
+	Rage.wallSeen = Rage.wallSeen or setmetatable({}, { __mode = "k" })
+	local wallFresh = false
+	if target then
+		local walls = target.walls or 0
+		local prevWalls = Rage.wallSeen[target.entity]
+		if walls > 0 and (prevWalls == nil or walls < prevWalls) then
+			wallFresh = true
+			Rage.peekAt[target.entity] = nowClock
+		end
+		Rage.wallSeen[target.entity] = walls
+	else
+		for entity in pairs(Rage.wallSeen) do
+			if not (Rage.visState[entity] and nowClock - (Rage.visState[entity].at or 0) < 1) then Rage.wallSeen[entity] = nil end
+		end
+	end
+	if not target then return hold("no target in fov") end
+	if not config.autoFire then return hold("auto fire off") end
+	if not Game.weaponReady(weapon) then
+		return hold(weapon.IsReloading and "reloading" or "weapon not ready")
+	end
 
 	if config.quickStop then Rage.stopping = true end
 
@@ -6167,31 +6658,38 @@ local function rageStep()
 	local bar = need
 	if fresh then bar = need * 0.7
 	elseif fastOpen then bar = math.clamp(need * 0.6, 25, 55) end
-	if Rage.stable < 1 and not (fresh or fastOpen) then return end
+	if Rage.stable < 1 and not (fresh or fastOpen or wallFresh) then return hold("warming up") end
 
 	if (target.walls or 0) > 0 then
 		need = math.min(need + 4, 97)
-		if Rage.stable < 2 then return end
+		if Rage.stable < 2 and not wallFresh then return hold("warming up (wall)") end
+		-- Через стену chance считается по разбросу у самой точки и почти всегда
+		-- ниже порога открытой цели, хотя линию уже проверил trace. Требовать
+		-- 65–95% здесь = вообще не стрелять в укрытие. Порог умеренный.
+		if wallFresh then bar = math.min(bar, math.clamp(need * 0.6, 25, 55))
+		elseif not fresh then bar = math.min(bar, math.clamp(need * 0.8, 35, 60)) end
 	end
-	if not direct and target.chance < bar then return end
-	if direct and target.chance < need * 0.65 and (target.damage or 0) < (target.health or 100) then return end
-	if direct and (target.walls or 0) > 0 and target.chance < need then return end
+	if not direct and target.chance < bar then return hold(("chance %d < %d"):format(math.floor(target.chance + 0.5), math.floor(bar + 0.5))) end
+	if direct and target.chance < need * 0.65 and (target.damage or 0) < (target.health or 100) then
+		return hold(("direct chance %d"):format(math.floor(target.chance + 0.5)))
+	end
+	if direct and (target.walls or 0) > 0 and target.chance < need then return hold("direct chance (wall)") end
 	local delayList = type(config.delayShot) == "table" and config.delayShot or {}
 	local needDamage, needChance = table.find(delayList, "Damage"), table.find(delayList, "Hit Chance")
 	if (needDamage or needChance) and not fastOpen and not (fresh and target.chance >= need * 0.75) then
-		if Rage.stable < 3 then return end
+		if Rage.stable < 3 then return hold("delay shot (warmup)") end
 		if Rage.delayEntity ~= target.entity then Rage.delayEntity, Rage.delaySince = target.entity, os.clock() end
 		local ready = true
 		if needDamage and (target.damage or 0) < math.max(config.minDamage, math.min(target.health or 100, 40)) then ready = false end
 		if needChance and target.chance < math.min(need + 10, 99) then ready = false end
-		if not ready and os.clock() - (Rage.delaySince or 0) < 0.3 then return end
+		if not ready and os.clock() - (Rage.delaySince or 0) < 0.3 then return hold("delay shot") end
 	end
 
 	local streak = Rage.missStreak and Rage.missStreak[target.entity]
 	-- Открытую цель после 2 промахов не «остужаем»: враг стоит на виду, и
 	-- пауза здесь = пропущенное окно. Штраф остаётся только для стен/history.
 	if streak and streak.n >= 2 and os.clock() - streak.t < 1.2 and not fresh and not fastOpen then
-		if Rage.stable < 2 then return end
+		if Rage.stable < 2 then return hold("miss cooldown") end
 	end
 
 	if sniper then
@@ -6202,10 +6700,10 @@ local function rageStep()
 				Rage.scopeAsked = os.clock()
 				mouse2click()
 			end
-			return
+			return hold("scoping")
 		end
-		if os.clock() - (Rage.scopeAsked or 0) < ((config.quickScope or fresh or fastOpen) and 0.02 or 0.12) then return end
-		if config.quickStop and (Rage.selfSpeed or 0) > 4 then return end
+		if os.clock() - (Rage.scopeAsked or 0) < ((config.quickScope or fresh or fastOpen) and 0.02 or 0.12) then return hold("scope delay") end
+		if config.quickStop and (Rage.selfSpeed or 0) > 4 then return hold("quick stop: moving") end
 	end
 
 	local now = os.clock()
@@ -6218,26 +6716,27 @@ local function rageStep()
 	local multiplier = (config.rapidFire and not semiAuto and not cooling and rapidOk) and math.max(Rage.rapidMultiplier(config, fireRate, weapon.Name), 1) or 1
 	-- Каденс = ровно темп оружия. Раньше сверху висело +12 мс «на всякий
 	-- случай» — это 10–15% скорости стрельбы на автоматах.
-	local cadence = math.max(fireRate / multiplier + 0.005, 0.03)
-	if now - lastShot < cadence then return end
+	local cadence = math.max(fireRate / multiplier + 0.005, 0.05)
+	if now - lastShot < cadence then return hold(("cadence %.0f ms"):format(((lastShot + cadence - now) * 1000))) end
 	if semiAuto then
 		local waiting = ShotTracker.pending[target.entity]
 		-- Не ждём полный re-fire у полуавтомата: 0.4 с паузы после каждого
 		-- выстрела — это и есть ощущение «медленного» бота.
-		if waiting and now - waiting.t < math.min(fireRate * 0.5 + 0.05, 0.18) then return end
+		if waiting and now - waiting.t < math.min(fireRate * 0.5 + 0.05, 0.18) then return hold("semi-auto wait") end
 	end
 	-- Неудачная попытка не должна стоить 70 мс: чаще всего это мигнувшая
 	-- линия на краю стены, и через пару миллисекунд она уже свободна.
 	local retryAt = now - cadence + 0.02
 	lastShot = now
 	Rage.shooting = true
+	Rage.block = nil
 	local shotStats = Neverlose.stats or {}
 	Neverlose.stats = shotStats
 	shotStats.attempts = (shotStats.attempts or 0) + 1
 	shotStats.reactMs = (now - (Rage.seenAt or now)) * 1000
 	Rage.delayEntity = nil
 	-- Свежий пик: не ведём цель (см. aimBullet) — пуля должна идти в живую точку.
-	if fresh or fastOpen then target.noLead = true end
+	if fresh or fastOpen or wallFresh then target.noLead = true end
 
 	local multi = config.multiTarget and #targets > 1
 	if not revolver and (direct or (multi and not slowGun) or (config.doubleTap and not slowGun)) then
@@ -6294,6 +6793,21 @@ local function rageStep()
 		end
 
 		if multi or Rage.lastFail == "aim point blocked or out of range" then
+			lastShot = retryAt
+			return
+		end
+	end
+
+	-- Мгновенный выстрел: шлём пулю напрямую, не дожидаясь, пока игра обработает
+	-- синтетический клик (это лишний кадр — та самая «задержка»). Путь тот же,
+	-- что у double tap, поэтому серверу он уже знаком. Если не вышло —
+	-- проваливаемся на обычный клик, чтобы выстрел не потерялся.
+	if config.instantShot ~= false and not revolver then
+		if Rage.remoteFire(weapon, target, 1) then
+			Rage.clickAt = os.clock()
+			return
+		end
+		if Rage.lastFail == "aim point blocked or out of range" then
 			lastShot = retryAt
 			return
 		end
@@ -7493,7 +8007,9 @@ CHAMS_STYLE = {
 	Solid = { fill = 0, outline = 0.6, material = Enum.Material.SmoothPlastic, flat = true },
 	Glow = { fill = 0.15, outline = 0, material = Enum.Material.Neon, pulse = true },
 	["Glow Outline"] = { fill = 1, outline = 0, pulse = true },
-	Neon = { fill = 1, outline = 1, neon = true, pulse = true },
+	["Neon Glow"] = { fill = 1, outline = 1, neon = true, pulse = true },
+	-- Neon: глянец по хитбоксам из настоящих частей (материал + Reflectance).
+	Neon = { fill = 0, outline = 0, material = Enum.Material.SmoothPlastic, reflectance = 0.6, hitmat = true },
 	Iridescent = { fill = 0.3, outline = 0.1, material = Enum.Material.Foil },
 	["Water Flow"] = { fill = 0.5, outline = 0.2, material = Enum.Material.Glass, alpha = 0.35 },
 	Glossy = { fill = 0.25, outline = 0.1, material = Enum.Material.Metal },
@@ -7516,12 +8032,15 @@ CHAMS_STYLE = {
 
 BodyMat = {}
 
-function BodyMat.one(store, object, material, color, alpha)
+function BodyMat.one(store, object, material, color, alpha, reflectance)
 	if object:IsA("BasePart") then
 		local saved = store[object]
 		if not saved then
 			if object.Name == "HumanoidRootPart" or object.Transparency >= 0.99 then return end
-			saved = { Material = object.Material, Color = object.Color, Transparency = object.Transparency }
+			saved = {
+				Material = object.Material, Color = object.Color,
+				Transparency = object.Transparency, Reflectance = object.Reflectance,
+			}
 			if object:IsA("MeshPart") then saved.TextureID = object.TextureID end
 			store[object] = saved
 		end
@@ -7531,6 +8050,8 @@ function BodyMat.one(store, object, material, color, alpha)
 		object.Color = Color3.new(math.min(color.R * shade, 1), math.min(color.G * shade, 1), math.min(color.B * shade, 1))
 		if object:IsA("MeshPart") then object.TextureID = "" end
 		object.Transparency = alpha and math.max(saved.Transparency, alpha) or saved.Transparency
+		-- Глянец: чем выше reflectance, тем ярче отражённый свет/блик.
+		object.Reflectance = reflectance or saved.Reflectance or 0
 	elseif object:IsA("Decal") or object:IsA("Texture") then
 		if not store[object] then store[object] = { Transparency = object.Transparency } end
 		object.Transparency = 1
@@ -7543,9 +8064,9 @@ function BodyMat.one(store, object, material, color, alpha)
 	end
 end
 
-function BodyMat.scan(store, model, material, color, alpha)
-	BodyMat.one(store, model, material, color, alpha)
-	for _, object in ipairs(model:GetDescendants()) do BodyMat.one(store, object, material, color, alpha) end
+function BodyMat.scan(store, model, material, color, alpha, reflectance)
+	BodyMat.one(store, model, material, color, alpha, reflectance)
+	for _, object in ipairs(model:GetDescendants()) do BodyMat.one(store, object, material, color, alpha, reflectance) end
 end
 
 function BodyMat.restore(store)
@@ -7557,6 +8078,7 @@ function BodyMat.restore(store)
 				object.TextureId = saved.MeshTexture
 			elseif saved.Material then
 				object.Material, object.Color, object.Transparency = saved.Material, saved.Color, saved.Transparency
+				if saved.Reflectance then object.Reflectance = saved.Reflectance end
 				if saved.TextureID ~= nil then object.TextureID = saved.TextureID end
 			elseif saved.Transparency ~= nil then
 				object.Transparency = saved.Transparency
@@ -7574,7 +8096,7 @@ function BodyMat.drive(state, model, style, color)
 		end
 		return
 	end
-	local key = tostring(style.material) .. "|" .. tostring(color)
+	local key = tostring(style.material) .. "|" .. tostring(color) .. "|" .. tostring(style.reflectance)
 	if state.key ~= key or state.char ~= model then
 		BodyMat.restore(state.store)
 		state.key, state.char, state.scan = key, model, 0
@@ -7582,7 +8104,7 @@ function BodyMat.drive(state, model, style, color)
 	local now = os.clock()
 	if now - state.scan > 0.4 then
 		state.scan = now
-		BodyMat.scan(state.store, model, style.material, color, style.alpha)
+		BodyMat.scan(state.store, model, style.material, color, style.alpha, style.reflectance)
 	end
 end
 
@@ -7979,19 +8501,34 @@ function EspObject:drawGhost(character, record, chams)
 	local color = chams.color
 	if style.rainbow then color = Color3.fromHSV((os.clock() * 0.2) % 1, 0.7, 1) end
 	local breath = 0.5 + 0.5 * math.sin(os.clock() * 2.4)
+	-- overlay: per-hitbox полупрозрачные части с материалом и Reflectance —
+	-- тот же приём, что у Neon, но без Highlight/Xray и не в плотную.
+	local overlay = chams.overlay == true
+	local alpha = style.ghostAlpha
+	if alpha == nil then
+		alpha = style.material and (style.alpha and 1 - style.alpha or 0.45) or 0.9
+	end
+	local grow = overlay and 1.025 or 1
 	local any = false
 	for name, part in pairs(ghost.parts) do
 		local cframe, live = record.cframes[name], character:FindFirstChild(name)
 		if cframe and live then
-			part.CFrame, part.Size, part.Color = cframe, live.Size, color
+			part.CFrame, part.Color = cframe, color
+			part.Size = live.Size * grow
 			part.Material = style.material or Enum.Material.SmoothPlastic
-			part.Transparency = style.material and (style.alpha and 1 - style.alpha or 0.45) or 0.9
+			part.Reflectance = style.reflectance or 0
+			part.Transparency = alpha
 			any = true
 		else
 			part.Transparency = 1
 		end
 	end
 	local light = ghost.light
+	if overlay then
+		light.Enabled = false
+		if Neverlose.Xray then Neverlose.Xray.clear(ghost) end
+		return
+	end
 	light.Enabled = any
 	light.FillColor = color
 	local boost = slot == "wallGhost" and math.clamp((Neverlose.config.esp.wallBoost or 60) / 100, 0, 1) or 0
@@ -8008,7 +8545,7 @@ function EspObject:drawGhost(character, record, chams)
 end
 
 function EspObject:hideGhost(only)
-	for _, key in ipairs({ "ghost", "wallGhost", "realGhost" }) do
+	for _, key in ipairs({ "ghost", "wallGhost", "glossGhost", "realGhost" }) do
 		local ghost = (not only or only == key) and self[key]
 		if ghost then
 			ghost.light.Enabled = false
@@ -8066,7 +8603,9 @@ function EspObject:destroy()
 	pcall(function() self.highlightVisible:Destroy() end)
 	if self.ghost then pcall(function() self.ghost.model:Destroy() end) end
 	if self.wallGhost then pcall(function() self.wallGhost.model:Destroy() end) end
+	if self.glossGhost then pcall(function() self.glossGhost.model:Destroy() end) end
 	self:neonDestroy()
+	pcall(self.hitmatDestroy, self)
 	self.billboard:Destroy()
 end
 
@@ -8101,8 +8640,11 @@ function EspObject:hideHighlights()
 	self.highlight.Enabled, self.highlightVisible.Enabled = false, false
 	if Neverlose.Xray then Neverlose.Xray.clear(self) end
 	self:hideGhost("wallGhost")
+	self:hideGhost("glossGhost")
 	self:setMaterial(nil)
 	self:neonHide()
+	self.hitmatOn = nil
+	self:hitmatHide()
 end
 
 function EspObject:setMaterial(character, style, color)
@@ -8188,19 +8730,321 @@ maid:give(function()
 end)
 end
 
+-- Neon: глянец по хитбоксам из настоящих частей. Персонаж не трогается.
+-- Открытый враг: часть в мире (материал + Reflectance). За стеной: копия этой же
+-- части в ViewportFrame поверх экрана, камера вьюпорта повторяет камеру игры.
+do
+	local HitMat = { records = setmetatable({}, { __mode = "k" }) }
+	Neverlose.HitMat = HitMat
+
+	local PARTS = {
+		Head = true, UpperTorso = true, LowerTorso = true,
+		LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
+		RightUpperArm = true, RightLowerArm = true, RightHand = true,
+		LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
+		RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
+		Torso = true, ["Left Arm"] = true, ["Right Arm"] = true, ["Left Leg"] = true, ["Right Leg"] = true,
+	}
+	local MUL = {
+		UpperTorso = Vector3.new(1, 1.04, 1),
+		LowerTorso = Vector3.new(0.95, 1.5, 1),
+		Torso = Vector3.one,
+	}
+	local MIN = Vector3.new(0.05, 0.05, 0.05)
+	local INFLATE = 1.05
+
+	local function meshScale(part)
+		local mesh = part:FindFirstChildOfClass("SpecialMesh")
+		if mesh then
+			local scale = mesh.Scale
+			if typeof(scale) == "Vector3" then return scale end
+		end
+		return nil
+	end
+
+	local function hitSize(part, trim)
+		local size = part.Size
+		local scale = meshScale(part)
+		local base
+		if part.Name == "Head" then
+			base = scale and size * scale or size
+			if trim ~= 1 then base = base * trim end
+		elseif scale then
+			base = size * scale
+		elseif MUL[part.Name] then
+			base = size * MUL[part.Name]
+		else
+			local x, y, z = size.X, size.Y, size.Z
+			if y >= x and y >= z then
+				base = Vector3.new(x, y * 1.08, z)
+			elseif x >= y and x >= z then
+				base = Vector3.new(x * 1.08, y, z)
+			else
+				base = Vector3.new(x, y, z * 1.08)
+			end
+		end
+		return (base * INFLATE):Max(MIN)
+	end
+
+	local function usable(part, character)
+		if part.Parent ~= character or not PARTS[part.Name] or not part:IsA("BasePart") then return false end
+		local size = part.Size
+		return size.X > 0.05 and size.Y > 0.05 and size.Z > 0.05
+	end
+
+	local folder, gui, viewport, viewCamera
+
+	local function hostAlive()
+		return folder and folder.Parent and gui and gui.Parent and viewport and viewport.Parent and viewCamera and viewCamera.Parent
+	end
+
+	local function ensureHost()
+		local camera = workspaceService.CurrentCamera or currentCamera
+		if not camera then return nil end
+		if not hostAlive() then
+			-- Хост пропал вместе с камерой: всё внутри уничтожено.
+			table.clear(HitMat.records)
+			if folder then pcall(function() folder:Destroy() end) end
+			if gui then pcall(function() gui:Destroy() end) end
+			folder = newInstance("Folder", { Name = randomName() }, camera)
+			maid:give(folder)
+			-- Ниже игрового интерфейса (у него DisplayOrder 0) и ниже ESP чита.
+			gui = newInstance("ScreenGui", { Name = randomName(), ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = -100 }, hiddenRoot)
+			maid:give(gui)
+			viewport = newInstance("ViewportFrame", {
+				Name = randomName(), BackgroundTransparency = 1, BorderSizePixel = 0,
+				Size = UDim2.fromScale(1, 1), Position = UDim2.fromScale(0, 0), Active = false,
+				ImageTransparency = 0, ImageColor3 = Color3.new(1, 1, 1),
+				Ambient = Color3.fromRGB(120, 120, 130), LightColor = Color3.new(1, 1, 1), LightDirection = Vector3.new(-0.4, -1, -0.5),
+			}, gui)
+			viewCamera = newInstance("Camera", { Name = randomName() }, viewport)
+			viewport.CurrentCamera = viewCamera
+		elseif folder.Parent ~= camera then
+			folder.Parent = camera
+		end
+		return camera
+	end
+
+	local function ghostPart(parent)
+		return newInstance("Part", {
+			Name = randomName(), Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false,
+			CastShadow = false, Massless = true, Locked = true, Transparency = 1, Size = Vector3.one,
+		}, parent)
+	end
+
+	local function dropSlot(slot)
+		pcall(function() slot.ghost:Destroy() end)
+		pcall(function() slot.view:Destroy() end)
+	end
+
+	local function setTransparency(slot, world, view)
+		if slot.worldT ~= world then
+			slot.worldT = world
+			slot.ghost.Transparency = world
+		end
+		if slot.viewT ~= view then
+			slot.viewT = view
+			slot.view.Transparency = view
+		end
+	end
+
+	local function newRecord()
+		return {
+			model = newInstance("Model", { Name = randomName() }, folder),
+			viewModel = newInstance("Model", { Name = randomName() }, viewport),
+			slots = {}, scanAt = 0, trim = 1, hidden = false,
+		}
+	end
+
+	local function sync(record, character)
+		local team = character:GetAttribute("Team")
+		record.trim = (team == "Counter-Terrorists" or team == "CT") and 0.88 or 1
+		for _, child in ipairs(character:GetChildren()) do
+			if not record.slots[child] and usable(child, character) then
+				local base = hitSize(child, record.trim)
+				local ghost, view = ghostPart(record.model), ghostPart(record.viewModel)
+				ghost.Size, view.Size = base, base
+				ghost.CFrame, view.CFrame = child.CFrame, child.CFrame
+				record.slots[child] = { ghost = ghost, view = view, size = child.Size }
+			end
+		end
+		for part, slot in pairs(record.slots) do
+			if part.Parent ~= character then
+				dropSlot(slot)
+				record.slots[part] = nil
+			elseif slot.size ~= part.Size then
+				slot.size = part.Size
+				local base = hitSize(part, record.trim)
+				slot.ghost.Size, slot.view.Size = base, base
+			end
+		end
+	end
+
+	local function clearSlots(record)
+		for part, slot in pairs(record.slots) do
+			dropSlot(slot)
+			record.slots[part] = nil
+		end
+	end
+
+	local function hideRecord(record)
+		record.hidden = true
+		for _, slot in pairs(record.slots) do setTransparency(slot, 1, 1) end
+	end
+
+	function EspObject:hitmatShow(character, color, inSight, mix, def)
+		local camera = ensureHost()
+		if not camera then return end
+		local record = HitMat.records[self]
+		if not record then
+			record = newRecord()
+			HitMat.records[self] = record
+		end
+		if record.character ~= character then
+			clearSlots(record)
+			record.character, record.scanAt = character, 0
+		end
+		local now = os.clock()
+		if now - record.scanAt > 0.5 then
+			record.scanAt = now
+			sync(record, character)
+		end
+		record.at, record.hidden = now, false
+
+		-- Камера вьюпорта повторяет камеру игры, иначе копии съедут с хитбоксов.
+		viewCamera.CFrame = camera.CFrame
+		viewCamera.FieldOfView = camera.FieldOfView
+
+		local material = def.material or Enum.Material.SmoothPlastic
+		local reflectance = def.reflectance or 0.6
+		-- Всегда рисуем копию во вьюпорте: у неё яркий свет, как за стеной.
+		local through = true
+		for part, slot in pairs(record.slots) do
+			if part.Parent == character then
+				if slot.size ~= part.Size then
+					slot.size = part.Size
+					local base = hitSize(part, record.trim)
+					slot.ghost.Size, slot.view.Size = base, base
+				end
+				local cframe = part.CFrame
+				slot.ghost.CFrame = cframe
+				if through then slot.view.CFrame = cframe end
+				if slot.color ~= color then
+					slot.color = color
+					slot.ghost.Color, slot.view.Color = color, color
+				end
+				if slot.material ~= material or slot.reflectance ~= reflectance then
+					slot.material, slot.reflectance = material, reflectance
+					slot.ghost.Material, slot.view.Material = material, material
+					slot.ghost.Reflectance, slot.view.Reflectance = reflectance, reflectance
+				end
+				setTransparency(slot, 1, 0)
+			end
+		end
+	end
+
+	function EspObject:hitmatHide()
+		local record = HitMat.records[self]
+		if record then hideRecord(record) end
+	end
+
+	function EspObject:hitmatDestroy()
+		local record = HitMat.records[self]
+		if not record then return end
+		pcall(function() record.model:Destroy() end)
+		pcall(function() record.viewModel:Destroy() end)
+		HitMat.records[self] = nil
+	end
+
+	-- Отражения видны, только когда у Lighting включён EnvironmentSpecularScale.
+	local saved
+	local function reflections(active)
+		if active then
+			if not saved then saved = { lightingService.EnvironmentSpecularScale, lightingService.EnvironmentDiffuseScale } end
+			lightingService.EnvironmentSpecularScale = math.max(saved[1], 1)
+			lightingService.EnvironmentDiffuseScale = math.max(saved[2], 0.6)
+		elseif saved then
+			lightingService.EnvironmentSpecularScale, lightingService.EnvironmentDiffuseScale = saved[1], saved[2]
+			saved = nil
+		end
+	end
+
+	maid:give(runService.Heartbeat:Connect(function()
+		local now = os.clock()
+		local any = false
+		for _, record in pairs(HitMat.records) do
+			if record.at and now - record.at < 0.3 then
+				any = true
+			elseif not record.hidden then
+				hideRecord(record)
+			end
+		end
+		reflections(any)
+	end))
+	maid:give(function() reflections(false) end)
+end
+
 function EspObject:applyChams(character, visible, walls, glow, forceColor, inSight, mix)
 	local wallStyle, visibleStyle = CHAMS_STYLE[walls.mode], CHAMS_STYLE[visible.mode]
 	mix = math.clamp(tonumber(mix) or (inSight and 1 or 0), 0, 1)
+	local sighted = inSight == true and visibleStyle ~= nil
 
-	if wallStyle and not wallStyle.neon and not (inSight == true and visibleStyle ~= nil) then
+	-- Цвет: Behind Walls -> Player по доле открытого тела. Если один из стилей
+	-- выключен, берём цвет включённого, чтобы не смешивать с белым.
+	local color = forceColor
+	if not color then
+		local visCol = visibleStyle and (visible.color or Color3.new(1, 1, 1)) or nil
+		local wallCol = wallStyle and (walls.color or Color3.new(1, 1, 1)) or nil
+		if visCol and wallCol then
+			color = wallCol:Lerp(visCol, mix)
+		else
+			color = visCol or wallCol or Color3.new(1, 1, 1)
+		end
+	end
+
+	-- Neon: глянец по хитбоксам. Работает и при открытом, и при закрытом враге,
+	-- двигается каждый кадр, поэтому отдельно и до кэш-проверки.
+	local hitStyle = (visibleStyle and visibleStyle.hitmat and visibleStyle) or (wallStyle and wallStyle.hitmat and wallStyle) or nil
+	if hitStyle then
+		if not self.hitmatOn then
+			self.hitmatOn = true
+			self.chamsCache = nil
+			self:hideGhost("wallGhost")
+			self:hideGhost("glossGhost")
+			self.highlight.Enabled, self.highlightVisible.Enabled = false, false
+			if Neverlose.Xray then Neverlose.Xray.clear(self) end
+			self:setMaterial(nil)
+			self:neonHide()
+		end
+		self:hitmatShow(character, color, inSight, mix, hitStyle)
+		return
+	end
+	if self.hitmatOn then
+		self.hitmatOn = nil
+		self:hitmatHide()
+	end
+
+	-- Оверлеи должны двигаться каждый кадр, поэтому обновляются до кэш-проверки.
+	local function liveRecord()
 		local record = { cframes = {} }
 		for _, name in ipairs(BODY_PARTS) do
 			local live = character:FindFirstChild(name)
 			if live then record.cframes[name] = live.CFrame end
 		end
-		self:drawGhost(character, record, { mode = walls.mode, color = forceColor or walls.color or Color3.new(1, 1, 1), slot = "wallGhost" })
+		return record
+	end
+
+	if wallStyle and not wallStyle.neon and not sighted then
+		self:drawGhost(character, liveRecord(), { mode = walls.mode, color = forceColor or walls.color or Color3.new(1, 1, 1), slot = "wallGhost" })
 	else
 		self:hideGhost("wallGhost")
+	end
+	-- В открытую: глянец тем же способом, что Neon — заливка по хитбоксам,
+	-- только полупрозрачная и с отражением света вместо свечения.
+	if sighted and visibleStyle.overlay and not visibleStyle.neon then
+		self:drawGhost(character, liveRecord(), { mode = visible.mode, color = color, slot = "glossGhost", overlay = true })
+	else
+		self:hideGhost("glossGhost")
 	end
 	local cache = self.chamsCache
 	if not cache then cache = {} self.chamsCache = cache end
@@ -8225,20 +9069,7 @@ function EspObject:applyChams(character, visible, walls, glow, forceColor, inSig
 
 	local back = self.highlight
 	self.highlightVisible.Enabled = false
-	local sighted = inSight == true and visibleStyle ~= nil
 	local style = sighted and visibleStyle or wallStyle
-	-- Цвет: Behind Walls -> Player по доле открытого тела. Если один из стилей
-	-- выключен, берём цвет включённого, чтобы не смешивать с белым.
-	local color = forceColor
-	if not color then
-		local visCol = visibleStyle and (visible.color or Color3.new(1, 1, 1)) or nil
-		local wallCol = wallStyle and (walls.color or Color3.new(1, 1, 1)) or nil
-		if visCol and wallCol then
-			color = wallCol:Lerp(visCol, mix)
-		else
-			color = visCol or wallCol or Color3.new(1, 1, 1)
-		end
-	end
 	if style and style.rainbow and not forceColor then color = Color3.fromHSV((os.clock() * 0.2) % 1, 0.7, 1) end
 	if style and style.neon then
 		self:neonShow(character, color, glow, { vis = visible, wall = walls, mix = mix, visibleStyle = visibleStyle, wallStyle = wallStyle })
@@ -8253,7 +9084,7 @@ function EspObject:applyChams(character, visible, walls, glow, forceColor, inSig
 	if style and not xray and not style.neon and not style.material then
 		back.Adornee, back.DepthMode = character, Enum.HighlightDepthMode.AlwaysOnTop
 		local breath = 0.5 + 0.5 * math.sin(os.clock() * 2.4)
-		local fillT = math.min(style.fill + (style.pulse and 0.16 * breath or 0), 1)
+		local fillT = math.min((style.fill or 0.5) + (style.pulse and 0.16 * breath or 0), 1)
 		if style.material then fillT = 1 end
 		back.FillColor, back.FillTransparency = color, fillT
 		-- Края (обводка Highlight) убраны: цветной заливки достаточно.
@@ -8262,7 +9093,9 @@ function EspObject:applyChams(character, visible, walls, glow, forceColor, inSig
 	else
 		back.Enabled = false
 	end
-	if sighted and visibleStyle.material then self:setMaterial(character, visibleStyle, color) else self:setMaterial(nil) end
+	-- Глянец рисуется оверлеем по хитбоксам (glossGhost), тело не красим:
+	-- иначе заливка была бы плотной, а нужна полупрозрачная.
+	if sighted and visibleStyle.material and not visibleStyle.overlay then self:setMaterial(character, visibleStyle, color) else self:setMaterial(nil) end
 end
 
 function EspObject:underlay(key, kind, properties)
@@ -9036,8 +9869,15 @@ function EspObject:drawBars(colors, position, width)
 	local function tinted(base)
 		return function(t) return darken(base, 0.5 + 0.5 * t) end
 	end
-	self:drawGradBar("armor", self.armorBack, self.armorBar, colors.armorWidth or 2, 10, tinted(colors.armor), colors.glowArmor and colors.glowArmorColor or nil, colors.glowArmorSize, colors.glowArmorPower, colors.armorRound)
-	self:drawGradBar("ammo", self.ammoBack, self.ammoBar, colors.ammoWidth or 2, 10, tinted(colors.ammo), colors.glowAmmo and colors.glowAmmoColor or nil, colors.glowAmmoSize, colors.glowAmmoPower, colors.ammoRound)
+	-- Настоящий градиент: от второго цвета (начало бара) к основному (конец).
+	-- Выключен — старое затемнение одного цвета.
+	local function gradientBar(base, second, enabled)
+		if enabled == false then return tinted(base) end
+		local from = second or darken(base, 0.45)
+		return function(t) return from:Lerp(base, math.clamp(t, 0, 1)) end
+	end
+	self:drawGradBar("armor", self.armorBack, self.armorBar, colors.armorWidth or 2, 10, gradientBar(colors.armor, colors.armor2, colors.armorGradient), colors.glowArmor and colors.glowArmorColor or nil, colors.glowArmorSize, colors.glowArmorPower, colors.armorRound)
+	self:drawGradBar("ammo", self.ammoBack, self.ammoBar, colors.ammoWidth or 2, 10, gradientBar(colors.ammo, colors.ammo2, colors.ammoGradient), colors.glowAmmo and colors.glowAmmoColor or nil, colors.glowAmmoSize, colors.glowAmmoPower, colors.ammoRound)
 	self:drawGradBar("ready", self.readyBack, self.readyBar, colors.readyWidth or 2, 10, tinted(colors.ready), colors.glowReady and colors.glowReadyColor or nil, colors.glowReadySize, colors.glowReadyPower, colors.readyRound)
 
 	local text = self.healthText
@@ -10238,12 +11078,13 @@ do
 		end
 
 		local overlayStyle = weaponRoot and config.weapon ~= "Default" and CHAMS_STYLE[config.weapon] or nil
+		if overlayStyle and overlayStyle.pixel then overlayStyle = nil end
 		weaponHighlight.Enabled = overlayStyle ~= nil
 		if overlayStyle then
 			weaponHighlight.Adornee = weaponRoot
 			weaponHighlight.FillColor = config.weaponColor
 			weaponHighlight.OutlineColor = config.weaponColor:Lerp(Color3.new(1, 1, 1), 0.3)
-			weaponHighlight.FillTransparency, weaponHighlight.OutlineTransparency = overlayStyle.material and 1 or overlayStyle.fill, overlayStyle.outline
+			weaponHighlight.FillTransparency, weaponHighlight.OutlineTransparency = overlayStyle.material and 1 or (overlayStyle.fill or 0.5), overlayStyle.outline
 			weaponHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
 		end
 
@@ -11356,7 +12197,7 @@ local function paintModel(model, visible, walls)
 		if def.neon then
 			shown = { material = Enum.Material.Neon, alpha = 0 }
 		else
-			shown = { material = def.material or (def.fill >= 1 and Enum.Material.ForceField) or Enum.Material.Neon, alpha = def.alpha }
+			shown = { material = def.material or (def.fill >= 1 and Enum.Material.ForceField) or Enum.Material.Neon, alpha = def.alpha, reflectance = def.reflectance }
 		end
 		Preview.bodyState.scan = 0
 		BodyMat.drive(Preview.bodyState, model, shown, style.color)
@@ -11818,8 +12659,14 @@ function Preview.update()
 		end
 	end
 	setBar(ui.health, "health", hp, healthAt(hp), healthAt(hp), colors.healthLow, "hpWidth", "glowHealth", "hpRound")
-	setBar(ui.armor, "armor", 0.55, colors.armor, nil, nil, "armorWidth", "glowArmor", "armorRound")
-	setBar(ui.ammo, "ammo", 0.6, colors.ammo, nil, nil, "ammoWidth", "glowAmmo", "ammoRound")
+	local function barPair(first, second, enabled)
+		if enabled == false then return nil, nil end
+		return first, second or Color3.new(first.R * 0.45, first.G * 0.45, first.B * 0.45)
+	end
+	local armorTop, armorLow = barPair(colors.armor, colors.armor2, colors.armorGradient)
+	local ammoTop, ammoLow = barPair(colors.ammo, colors.ammo2, colors.ammoGradient)
+	setBar(ui.armor, "armor", 0.55, colors.armor, armorTop, armorLow, "armorWidth", "glowArmor", "armorRound")
+	setBar(ui.ammo, "ammo", 0.6, colors.ammo, ammoTop, ammoLow, "ammoWidth", "glowAmmo", "ammoRound")
 	setBar(ui.ready, "ready", 0.85, colors.ready, nil, nil, "readyWidth", "glowReady", "readyRound")
 
 	for id, label in pairs(sized) do
@@ -12683,7 +13530,38 @@ do
 		return Vector2.new(pa.X, pa.Y), Vector2.new(pb.X, pb.Y)
 	end
 	local lastSim, cached, cachedMarkers, cachedEta = 0, nil, nil, nil
-	maid:give(runService.RenderStepped:Connect(function()
+	local FIXED_COUNT = 160
+	local displayPoints, displayValid = nil, 0
+	-- Milk: сплайн-ресэмплинг сырых точек физики в фиксированное число точек вдоль
+	-- длины пути. Убирает стыки-изломы на отскоках, линия выходит гладкой кривой.
+	local function resamplePath(raw, count)
+		local n = #raw
+		if n < 2 then return nil end
+		local lengths, total = { 0 }, 0
+		for i = 2, n do
+			total += (raw[i] - raw[i - 1]).Magnitude
+			lengths[i] = total
+		end
+		if total < 0.01 then return nil end
+		local function pointAt(dist)
+			local lo, hi = 1, n
+			while lo < hi do
+				local mid = (lo + hi) // 2
+				if lengths[mid] < dist then lo = mid + 1 else hi = mid end
+			end
+			local i1 = math.max(lo - 1, 1)
+			local i2 = math.min(i1 + 1, n)
+			local segLen = lengths[i2] - lengths[i1]
+			local t = segLen > 0.0001 and (dist - lengths[i1]) / segLen or 0
+			local p0, p1, p2, p3 = raw[math.max(i1 - 1, 1)], raw[i1], raw[i2], raw[math.min(i2 + 1, n)]
+			local t2, t3 = t * t, t * t * t
+			return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+		end
+		local out = {}
+		for i = 1, count do out[i] = pointAt(total * (i - 1) / (count - 1)) end
+		return out
+	end
+	maid:give(runService.RenderStepped:Connect(function(dt)
 		local world = Neverlose.config.world
 		local weapon = Game.weapon()
 		local name = weapon and weapon.Name
@@ -12694,6 +13572,7 @@ do
 			etaText.Visible = false
 			for index, dot in ipairs(bounceDots) do dot.Visible = false bounceRings[index].Visible = false end
 			for index = 1, IMPACT_SEG do impactLines[index].Visible, impactGlow[index].Visible, impactTris[index].Visible = false, false, false end
+			displayPoints = nil
 			return
 		end
 
@@ -12703,18 +13582,29 @@ do
 			local ok, points, markers, eta = pcall(simulate, name, mode)
 			if ok then cached, cachedMarkers, cachedEta = points, markers, eta end
 		end
-		local points = cached or {}
-		local step = math.max(1, math.ceil(#points / #segments))
-		local index = 0
-		local total = math.max(math.ceil((#points - 1) / step), 1)
+		-- Milk: ресэмплим сырой путь в фиксированные точки, затем плавно подтягиваем
+		-- отображаемые точки к ним каждый кадр — поворот камеры/мыши больше не дёргает
+		-- линию рывком между пересчётами симуляции (эффект smooth).
+		local resampled = resamplePath(cached or {}, FIXED_COUNT)
+		if resampled then
+			if not displayPoints or displayValid ~= FIXED_COUNT then
+				displayPoints, displayValid = {}, FIXED_COUNT
+				for i = 1, FIXED_COUNT do displayPoints[i] = resampled[i] end
+			else
+				local smoothAlpha = 1 - math.exp(-(dt or 1 / 60) * 20)
+				for i = 1, FIXED_COUNT do displayPoints[i] = displayPoints[i]:Lerp(resampled[i], smoothAlpha) end
+			end
+		end
+		local points = displayPoints or {}
 		local tail = GRENADES[name].color
-		for p = 1, #points - step, step do
+		local index = 0
+		for p = 1, #points - 1 do
 			index += 1
 			local line = segments[index]
 			if not line then break end
 			local shadow = shadows[index]
-			local from, to = projectSegment(points[p], points[math.min(p + step, #points)])
-			local alpha = (index - 1) / total
+			local from, to = projectSegment(points[p], points[p + 1])
+			local alpha = (index - 1) / math.max(#points - 2, 1)
 			line.Visible, shadow.Visible = from ~= nil, from ~= nil
 			if from then
 				line.From, line.To, shadow.From, shadow.To = from, to, from, to
@@ -13554,14 +14444,30 @@ end
 end
 
 do
-	local SEG, MAX_ZONES = 36, 6
+	local SEG, MAX_ZONES = 28, 4
+	local ZONE_MAX_ALPHA = 0.9
+	-- false = зону видно сквозь стены (заливка, контур и подпись), форма всё равно режется стенами. true = прячется за стенами.
+	local ZONE_HIDE_BEHIND_WALLS = false
+	-- true = зона обрезается стенами и не заходит за них (как контур). false = всегда полный круг.
+	local ZONE_SHAPE = true
+
+	-- Размер зоны относительно измеренного (1.0 = как есть). Там, где зону режет стена, размер не растёт.
+	local ZONE_SCALE = 1.08
+	-- Неон только на самой кромке: яркая тонкая линия и мягкие слои свечения, шире и слабее.
+	-- Первое число — толщина в пикселях, второе — непрозрачность слоя.
+	local NEON_CORE = { 2, 1 }
+	local NEON_GLOW = { { 18, 0.05 }, { 12, 0.09 }, { 7, 0.16 }, { 4, 0.3 } }
+
 	local zoneSets = {}
 	for zone = 1, MAX_ZONES do
-		local set = { glow = {}, ring = {}, fill = {} }
+		local set = { fill = {}, edge = {}, glow = {} }
 		for segment = 1, SEG do
-			set.ring[segment] = draw("Line", { Thickness = 2, Visible = false })
-			set.glow[segment] = draw("Line", { Thickness = 6, Visible = false })
 			set.fill[segment] = draw("Triangle", { Filled = true, Thickness = 0, Visible = false })
+			set.edge[segment] = draw("Line", { Thickness = NEON_CORE[1], Visible = false })
+			set.glow[segment] = {}
+			for layer, spec in ipairs(NEON_GLOW) do
+				set.glow[segment][layer] = draw("Line", { Thickness = spec[1], Visible = false })
+			end
 		end
 		set.heights, set.castAt, set.castKey = {}, 0, nil
 		zoneSets[zone] = set
@@ -13573,6 +14479,13 @@ do
 	zoneParams.FilterType = Enum.RaycastFilterType.Exclude
 	zoneParams.IgnoreWater = true
 	local paramsAt = 0
+	local refreshZoneFilter -- задаётся ниже, когда известен список зон
+	-- Milk: стены ищем лучами из группы столкновений "Bullet", как делают пули в этом скрипте.
+	-- обычный луч (группа Default) может пролетать сквозь карту, если стены лежат в другой группе.
+	local wallParams = RaycastParams.new()
+	wallParams.FilterType = Enum.RaycastFilterType.Exclude
+	wallParams.IgnoreWater = true
+	pcall(function() wallParams.CollisionGroup = "Bullet" end)
 
 	local function positionOf(object)
 		if object:IsA("Model") then return object:GetPivot().Position end
@@ -13599,7 +14512,7 @@ do
 		if object:IsA("BasePart") then take(object) end
 		for _, part in ipairs(object:GetDescendants()) do take(part) end
 		local centre, radius, mid
-		if count >= 8 then
+		if count >= 4 then
 			mid = sumY / count
 			centre = Vector3.new((low.X + high.X) / 2, low.Y, (low.Z + high.Z) / 2)
 			radius = math.max(math.max(high.X - low.X, high.Z - low.Z) / 2, 1)
@@ -13610,7 +14523,9 @@ do
 
 	local function hideZone(set)
 		for segment = 1, SEG do
-			set.ring[segment].Visible, set.glow[segment].Visible, set.fill[segment].Visible = false, false, false
+			set.fill[segment].Visible = false
+			set.edge[segment].Visible = false
+			for _, line in ipairs(set.glow[segment]) do line.Visible = false end
 		end
 	end
 
@@ -13622,7 +14537,11 @@ do
 		set.castAt, set.castKey = now, key
 		if now - paramsAt > 0.5 then
 			paramsAt = now
-			zoneParams.FilterDescendantsInstances = { localPlayer.Character, currentCamera, effectsFolder, workspaceService:FindFirstChild("Characters"), workspaceService:FindFirstChild("Debris") }
+			if refreshZoneFilter then
+				refreshZoneFilter()
+			else
+				zoneParams.FilterDescendantsInstances = { localPlayer.Character, currentCamera, effectsFolder, workspaceService:FindFirstChild("Characters"), workspaceService:FindFirstChild("Debris") }
+			end
 		end
 		-- The measured bottom of the voxels can sit inside the floor, so the ring is anchored to the ground found under the centre.
 		local start = Vector3.new(centre.X, math.max(mid or centre.Y, centre.Y + 3), centre.Z)
@@ -13637,6 +14556,177 @@ do
 		end
 	end
 
+	-- Milk: поиск зон. своя граната может лежать не в Debris — смотрим везде:
+	-- Debris, workspace, камера, персонаж, реестр CreateVoxelSmoke, тег Smoke.
+	local scanAt, candidates, candidateSet = 0, {}, {}
+
+	local function zoneKind(object)
+		if not object or not object.Parent or object == effectsFolder then return nil end
+		if not (object:IsA("Model") or object:IsA("Folder") or object:IsA("BasePart")) then return nil end
+		if object:GetAttribute("GrenadeName") ~= nil or object:GetAttribute("Weapon") ~= nil or object:HasTag("Grenade") then return nil end
+		local name = object.Name
+		if name:sub(1, 11) == "VoxelSmoke_" then return "smoke" end
+		if name:sub(1, 10) == "VoxelFire_" then return "fire" end
+		local lower = name:lower()
+		if lower:find("grenade", 1, true) then return nil end
+		-- Предмет в руках (вьюмодель в камере, инструмент, модель на персонаже) — не зона. Настоящие
+		-- VoxelSmoke_ / VoxelFire_ выше пропускаются без проверки, здесь только поиск по названию.
+		if object:IsA("Tool") or object:IsDescendantOf(currentCamera) or (localPlayer.Character and object:IsDescendantOf(localPlayer.Character)) then return nil end
+		if object:IsA("Model") and (object:FindFirstChildOfClass("Humanoid") or playersService:GetPlayerFromCharacter(object)) then return nil end
+		if lower:find("smoke", 1, true) then return "smoke" end
+		if lower:find("molotov", 1, true) or lower:find("incendiary", 1, true) or lower:find("inferno", 1, true) or lower:find("flame", 1, true) or lower:find("fire", 1, true) then return "fire" end
+		return nil
+	end
+
+	local function fireLabel(object)
+		local name = tostring(object:GetAttribute("GrenadeName") or object.Name):lower()
+		if name:find("incendiary", 1, true) then return "INCENDIARY" end
+		if name:find("molotov", 1, true) then return "MOLOTOV" end
+		return "FIRE"
+	end
+
+	local function rescan(now)
+		if now - scanAt < 0.25 then return end
+		scanAt = now
+		table.clear(candidates)
+		table.clear(candidateSet)
+		local function consider(object, forced)
+			if candidateSet[object] or object == effectsFolder then return end
+			local kind = forced or zoneKind(object)
+			if kind then
+				candidateSet[object] = true
+				candidates[#candidates + 1] = { object = object, kind = kind }
+			end
+		end
+		local function scan(parent)
+			if not parent then return end
+			for _, child in ipairs(parent:GetChildren()) do consider(child) end
+		end
+		local debris = workspaceService:FindFirstChild("Debris")
+		scan(debris)
+		scan(workspaceService)
+		scan(currentCamera)
+		scan(localPlayer.Character)
+		local registry = Neverlose.Ballistics and Neverlose.Ballistics.smokes
+		if registry then
+			for object in pairs(registry) do
+				if typeof(object) == "Instance" and object.Parent then consider(object, "smoke") end
+			end
+		end
+		for _, object in ipairs(collectionService:GetTagged("Smoke")) do
+			local root = object
+			if object:IsA("BasePart") and object.Parent and object.Parent ~= workspaceService and object.Parent ~= debris then root = object.Parent end
+			consider(root, "smoke")
+		end
+	end
+
+	local function collectSources(zones, now)
+		rescan(now)
+		local sources = {}
+		for _, entry in ipairs(candidates) do
+			local object = entry.object
+			if object.Parent and ((entry.kind == "smoke" and zones.smokeOn) or (entry.kind == "fire" and zones.fireOn)) then
+				local centre, measured, mid = extentOf(object, now)
+				if centre and measured and measured <= 60 then
+					local label, color = "SMOKE", zones.smokeColor
+					if entry.kind == "fire" then label, color = fireLabel(object), zones.fireColor end
+					sources[#sources + 1] = { position = centre + Vector3.new(0, 2.5, 0), radius = measured, color = color, label = label, key = object, mid = mid }
+				end
+			end
+		end
+		local cam = currentCamera.CFrame.Position
+		table.sort(sources, function(a, b) return (a.position - cam).Magnitude < (b.position - cam).Magnitude end)
+		return sources
+	end
+
+	-- Milk: луч для стен. триггеры и невидимые не-коллизионные объекты (зоны покупки и т.п.) стеной не считаются.
+	refreshZoneFilter = function()
+		local ignore, wallIgnore = {}, {}
+		local function push(item)
+			if item then
+				ignore[#ignore + 1] = item
+				wallIgnore[#wallIgnore + 1] = item
+			end
+		end
+		push(localPlayer.Character)
+		push(currentCamera)
+		push(effectsFolder)
+		push(workspaceService:FindFirstChild("Characters"))
+		push(workspaceService:FindFirstChild("Debris"))
+		for _, entry in ipairs(candidates) do push(entry.object) end
+		zoneParams.FilterDescendantsInstances = ignore
+		local okList, gameIgnore = pcall(Ballistics.ignoreList)
+		if okList and type(gameIgnore) == "table" then
+			for _, item in ipairs(gameIgnore) do wallIgnore[#wallIgnore + 1] = item end
+		end
+		wallParams.FilterDescendantsInstances = wallIgnore
+	end
+
+	local function castSolid(origin, vector)
+		local length = vector.Magnitude
+		if length < 1e-3 then return nil end
+		local unit, travelled = vector / length, 0
+		for _ = 1, 4 do
+			local hit = workspaceService:Raycast(origin, unit * (length - travelled), wallParams)
+			if not hit then return nil end
+			local object = hit.Instance
+			if isPassThrough(object) or (object.CanCollide == false and object.Transparency > 0.95) then
+				local step = hit.Distance + 0.05
+				origin = origin + unit * step
+				travelled += step
+				if travelled >= length then return nil end
+			else
+				return hit, travelled + hit.Distance
+			end
+		end
+		return nil
+	end
+
+	-- Физика как у контура: заливка и контур режутся стенами. От центра на SEG направлений,
+	-- на двух высотах, летит луч; где он упёрся в стену, зона кончается. Результат — доли радиуса.
+	local function updateClip(set, source, floor, baseY, now)
+		if not ZONE_SHAPE then
+			set.segFrac = nil
+			return
+		end
+		local radius = math.max(source.radius, 1)
+		local key = math.floor(radius * 2) .. ":" .. math.floor(floor.X * 2) .. ":" .. math.floor(floor.Z * 2) .. ":" .. math.floor(baseY * 2)
+		if set.clipKey == key and now - (set.clipAt or 0) < 2 then return end
+		if set.clipKey ~= key and now - (set.clipAt or -1) < 0.15 then return end
+		set.clipKey, set.clipAt = key, now
+		refreshZoneFilter()
+		local heights = { baseY + 1.0, baseY + 2.6 }
+		local fractions = set.segFrac or {}
+		for segment = 1, SEG do
+			local angle = (segment - 1) / SEG * math.pi * 2
+			local direction = Vector3.new(math.cos(angle), 0, math.sin(angle)) * radius
+			local reach = radius
+			for _, y in ipairs(heights) do
+				local hit, distance = castSolid(Vector3.new(floor.X, y, floor.Z), direction)
+				if hit then reach = math.min(reach, math.max(distance - 0.15, 0.3)) end
+			end
+			fractions[segment] = reach / radius
+		end
+		set.segFrac = fractions
+	end
+
+	-- Milk: контур и подпись Drawing не знают про глубину, поэтому стены проверяются лучами от камеры.
+	-- 10 раз в секунду, на каждый сегмент контура и на центр зоны.
+	local function updateOcclusion(set, floor, radius, labelPoint, now)
+		if now - (set.occAt or 0) < 0.1 then return end
+		set.occAt = now
+		set.hidden = set.hidden or {}
+		refreshZoneFilter()
+		local origin = currentCamera.CFrame.Position
+		local baseY = set.baseY or floor.Y
+		for segment = 1, SEG do
+			local angle = (segment - 1) / SEG * math.pi * 2
+			local point = Vector3.new(floor.X + math.cos(angle) * radius, (set.heights[segment] or baseY) + 0.8, floor.Z + math.sin(angle) * radius)
+			set.hidden[segment] = workspaceService:Raycast(origin, (point - origin) * 0.99, wallParams) ~= nil
+		end
+		set.labelHidden = workspaceService:Raycast(origin, (labelPoint - origin) * 0.99, wallParams) ~= nil
+	end
+
 	maid:give(runService.RenderStepped:Connect(function()
 		local world = Neverlose.config.world
 		local zones = world.zones
@@ -13644,21 +14734,8 @@ do
 		local now = os.clock()
 
 		if zones.enabled then
-			local sources = {}
-			local debris = workspaceService:FindFirstChild("Debris")
-			for _, child in ipairs(debris and debris:GetChildren() or {}) do
-				if zones.smokeOn and child.Name:sub(1, 11) == "VoxelSmoke_" then
-					local centre, measured, mid = extentOf(child, now)
-					if centre and measured then
-						sources[#sources + 1] = { position = centre + Vector3.new(0, 2.5, 0), radius = measured, color = zones.smokeColor, label = "SMOKE", key = child, mid = mid }
-					end
-				elseif zones.fireOn and child.Name:sub(1, 10) == "VoxelFire_" then
-					local centre, measured, mid = extentOf(child, now)
-					if centre and measured then
-						sources[#sources + 1] = { position = centre + Vector3.new(0, 2.5, 0), radius = measured, color = zones.fireColor, label = "FIRE", key = child, mid = mid }
-					end
-				end
-			end
+			local okSources, sources = pcall(collectSources, zones, now)
+			if not okSources then sources = {} end
 			local camera = currentCamera.CFrame.Position
 
 			for _, source in ipairs(sources) do
@@ -13672,41 +14749,65 @@ do
 					local grow = math.clamp((now - age) / 0.45, 0, 1)
 					local radius = source.radius * (1 - (1 - grow) * (1 - grow))
 					sampleGround(set, floor, math.max(radius, 1), now, source.mid)
+					updateClip(set, source, floor, set.baseY or floor.Y, now)
+					if ZONE_HIDE_BEHIND_WALLS then updateOcclusion(set, floor, math.max(radius, 1), source.position, now) end
 
 					local pulse = 0.5 + 0.5 * math.sin(now * 3)
-					local fillAlpha = math.clamp((zones.fillAlpha or 35) / 100, 0, 1) * (0.75 + 0.25 * pulse)
-					local points, visible = {}, {}
+					local baseAlpha = math.clamp((zones.fillAlpha or 35) / 100, 0, 1) * 0.875
+
+					-- Точки края, спроецированные на экран. Высота идёт по земле (set.heights),
+					-- форма режется стенами (set.segFrac): там, где стена, зона и неон кончаются на ней.
+					local fractions = set.segFrac
+					local baseY = set.baseY or floor.Y
+					local outerPts, outerVis = {}, {}
 					for segment = 1, SEG do
 						local angle = (segment - 1) / SEG * math.pi * 2
-						local height = set.heights[segment] or set.baseY or floor.Y
-						local screen = currentCamera:WorldToViewportPoint(Vector3.new(floor.X + math.cos(angle) * radius, height, floor.Z + math.sin(angle) * radius))
-						points[segment], visible[segment] = Vector2.new(screen.X, screen.Y), screen.Z > 0
+						local frac = fractions and fractions[segment] or 1
+						local clipped = frac < 0.97
+						local reach = clipped and 1 or ZONE_SCALE
+						local height = (clipped and baseY) or set.heights[segment] or baseY
+						local screen = currentCamera:WorldToViewportPoint(Vector3.new(floor.X + math.cos(angle) * radius * reach * frac, height, floor.Z + math.sin(angle) * radius * reach * frac))
+						outerPts[segment], outerVis[segment] = Vector2.new(screen.X, screen.Y), screen.Z > 0
 					end
-					local centreScreen = currentCamera:WorldToViewportPoint(Vector3.new(floor.X, (set.baseY or floor.Y) + 0.05, floor.Z))
-					local centre2 = Vector2.new(centreScreen.X, centreScreen.Y)
-					local centreVisible = centreScreen.Z > 0
+					local centreScreen = currentCamera:WorldToViewportPoint(Vector3.new(floor.X, baseY, floor.Z))
+					local centrePoint, centreVisible = Vector2.new(centreScreen.X, centreScreen.Y), centreScreen.Z > 0
+
+					-- Одна сплошная заливка: веер от центра, один цвет и одна прозрачность без градиента.
+					local alpha = math.min(baseAlpha, ZONE_MAX_ALPHA)
+					local showFill = zones.fill ~= false and alpha > 0.02
+					local neonOn = zones.glow ~= false
+					-- Сердцевина неона светлее цвета зоны, как у настоящей неоновой трубки.
+					local coreColor = source.color:Lerp(Color3.new(1, 1, 1), 0.55)
 					for segment = 1, SEG do
 						local following = segment % SEG + 1
-						local both = visible[segment] and visible[following]
-						local ring, glow, fill = set.ring[segment], set.glow[segment], set.fill[segment]
-						ring.Visible = both
-						if both then
-							ring.From, ring.To, ring.Color, ring.Thickness = points[segment], points[following], source.color, 2
-							ring.Transparency = 1
+						local both = outerVis[segment] and outerVis[following]
+
+						local triangle = set.fill[segment]
+						local filled = showFill and centreVisible and both
+						triangle.Visible = filled
+						if filled then
+							triangle.PointA, triangle.PointB, triangle.PointC = centrePoint, outerPts[segment], outerPts[following]
+							triangle.Color, triangle.Transparency = source.color, alpha
 						end
-						glow.Visible = both and zones.glow ~= false
-						if glow.Visible then
-							glow.From, glow.To, glow.Color, glow.Thickness, glow.Transparency = points[segment], points[following], source.color, 6, 0.2 + 0.1 * pulse
+
+						local neon = neonOn and both
+						local edge = set.edge[segment]
+						edge.Visible = neon
+						if neon then
+							edge.From, edge.To, edge.Color, edge.Thickness, edge.Transparency = outerPts[segment], outerPts[following], coreColor, NEON_CORE[1], NEON_CORE[2]
 						end
-						fill.Visible = both and centreVisible and zones.fill ~= false
-						if fill.Visible then
-							fill.PointA, fill.PointB, fill.PointC = centre2, points[segment], points[following]
-							fill.Color, fill.Transparency = source.color, fillAlpha
+						for layer, line in ipairs(set.glow[segment]) do
+							line.Visible = neon
+							if neon then
+								line.From, line.To, line.Color = outerPts[segment], outerPts[following], source.color
+								line.Transparency = math.min(NEON_GLOW[layer][2] * (0.85 + 0.3 * pulse), 1)
+							end
 						end
 					end
+
 					local label = zoneLabels[used]
 					local labelScreen, labelVisible = currentCamera:WorldToViewportPoint(source.position)
-					label.Visible = labelVisible and zones.labels ~= false
+					label.Visible = labelVisible and zones.labels ~= false and not (ZONE_HIDE_BEHIND_WALLS and set.labelHidden)
 					label.Text, label.Color = source.label, zones.iconColor
 					label.Position = Vector2.new(labelScreen.X, labelScreen.Y)
 				end
@@ -13719,7 +14820,6 @@ do
 		end
 	end))
 end
-
 do
 	local crossLines = {}
 	for index = 1, 4 do crossLines[index] = draw("Line", { Visible = false }) end
@@ -17054,7 +18154,7 @@ local function tip(object, text)
 	return object
 end
 
-local MATERIALS = { "Disabled", "Shaded", "Solid", "Glow", "Glow Outline", "Neon", "Iridescent", "Water Flow", "Glossy", "Wireframe", "Fresnel", "Hologram", "Frost", "Rainbow", "Plasma", "Lava", "Diamond", "Marble", "Slate", "Crystal" }
+local MATERIALS = { "Disabled", "Shaded", "Solid", "Glow", "Glow Outline", "Neon", "Neon Glow", "Iridescent", "Water Flow", "Glossy", "Wireframe", "Fresnel", "Hologram", "Frost", "Rainbow", "Plasma", "Lava", "Diamond", "Marble", "Slate", "Crystal" }
 local LOCAL_MATERIALS = { "Default", "Shaded", "Solid", "Glow", "Glow Outline", "Iridescent", "Water Flow", "Glossy", "Wireframe", "Fresnel", "Hologram", "Frost", "Rainbow", "Plasma", "Lava", "Diamond", "Marble", "Slate", "Crystal" }
 
 function Neverlose.modelRow(section, text, entry, options)
@@ -17264,12 +18364,12 @@ function Menu.visuals(window, hk)
 	local localModel = players:AddSection("Local Player Model", "left")
 	local localConfig = esp.localModel
 	local localBody = localModel:AddMenu("Model")
-	localBody:AddDropdownColorpicker("Player", MATERIALS, localConfig.modelColor, localMode("model", localConfig), setColor(localConfig, "modelColor")):Set(localStart(localConfig.model))
+	localBody:AddDropdownColorpicker("Player", LOCAL_MATERIALS, localConfig.modelColor, localMode("model", localConfig), setColor(localConfig, "modelColor")):Set(localStart(localConfig.model))
 	localBody:AddGroup()
-	localBody:AddDropdownColorpicker("Arms", MATERIALS, localConfig.handsColor, localMode("hands", localConfig), setColor(localConfig, "handsColor")):Set(localStart(localConfig.hands))
+	localBody:AddDropdownColorpicker("Arms", LOCAL_MATERIALS, localConfig.handsColor, localMode("hands", localConfig), setColor(localConfig, "handsColor")):Set(localStart(localConfig.hands))
 
 	local localWeapon = localModel:AddMenu("Weapon")
-	localWeapon:AddDropdownColorpicker("Weapon", MATERIALS, localConfig.weaponColor, localMode("weapon", localConfig), setColor(localConfig, "weaponColor")):Set(localStart(localConfig.weapon))
+	localWeapon:AddDropdownColorpicker("Weapon", LOCAL_MATERIALS, localConfig.weaponColor, localMode("weapon", localConfig), setColor(localConfig, "weaponColor")):Set(localStart(localConfig.weapon))
 	localWeapon:AddGroup()
 
 	local localAlpha = localModel:AddMenu("Transparency")
@@ -17295,8 +18395,8 @@ function Menu.visuals(window, hk)
 			S("Width", "boxWidth", 50, 200, "%"), S("Thickness", "boxThick", 1, 4, "px"), S("Roundness", "boxRound", 0, 20, "px"),
 		},
 		["Main/Health Bar"] = { { "Low Health Color", "color", "healthLow" }, { "Mid Color", "color", "healthMid" }, S("Width", "hpWidth", 1, 8, "px"), S("Roundness", "hpRound", 0, 8, "px"), T("Gradient", "healthGradient", true) },
-		["Main/Armor Bar"] = { S("Width", "armorWidth", 1, 6, "px"), S("Roundness", "armorRound", 0, 8, "px") },
-		["Main/Ammo Bar"] = { S("Height", "ammoWidth", 1, 6, "px"), S("Roundness", "ammoRound", 0, 8, "px") },
+		["Main/Armor Bar"] = { { "Gradient Color", "color", "armor2", default = Color3.fromRGB(40, 90, 235) }, T("Gradient", "armorGradient", true), S("Width", "armorWidth", 1, 6, "px"), S("Roundness", "armorRound", 0, 8, "px") },
+		["Main/Ammo Bar"] = { { "Gradient Color", "color", "ammo2", default = Color3.fromRGB(40, 90, 235) }, T("Gradient", "ammoGradient", true), S("Height", "ammoWidth", 1, 6, "px"), S("Roundness", "ammoRound", 0, 8, "px") },
 		["Weapon/Readiness Bar"] = { S("Height", "readyWidth", 1, 6, "px"), S("Roundness", "readyRound", 0, 8, "px") },
 		["Main/Skeleton"] = { S("Thickness", "skelThick", 1, 4, "px") },
 		["Main/Snaplines"] = { D("Origin", "snapOrigin", { "Bottom", "Center", "Top" }, true), S("Thickness", "snapThick", 1, 4, "px") },
@@ -18252,9 +19352,68 @@ function Menu.aimbot(window, hk)
 	tip(FireSettings:AddToggle("Quick Stop", rage.quickStop, set(rage, "quickStop")), "Stops your movement the moment a shot is about to be fired")
 	tip(FireSettings:AddToggle("Quick Scope", rage.quickScope, set(rage, "quickScope")), "Snipers fire right after the scope opens")
 	local OriginSettings = RageMain:AddToggle("Origin Scan", rage.originScan, set(rage, "originScan")):AddSettings()
-	OriginSettings:AddSlider("Range", 1, 16, math.clamp(rage.originRange or 8, 1, 16), set(rage, "originRange"), " st")
-	OriginSettings:AddSlider("Scans", 1, 12, rage.originScans or 4, set(rage, "originScans"))
-	OriginSettings:AddDropdown("Mode", { "default", "optimized", "precise" }, rage.originScanMode or "optimized", set(rage, "originScanMode"))
+	-- Milk: два режима Range и Scans.
+	-- Auto: значения ведёт профиль оружия, слайдеры их показывают и не перебивают.
+	-- Manual: слайдеры свободны, профиль эти два поля не трогает.
+	-- Максимумы равны зажимам в коде скана (Range 12, Scans 10): выше слайдер ничего не даст.
+	if rage.originFields ~= "Manual" then
+		rage.originFields = "Auto"
+		if type(rage.manualFields) == "table" then
+			rage.manualFields.originRange, rage.manualFields.originScans = nil, nil
+		end
+	end
+	local rangeSlider, scansSlider
+	local uiSyncing = false
+	local function syncOriginUi()
+		uiSyncing = true
+		if rangeSlider then pcall(rangeSlider.Set, rangeSlider, math.clamp(tonumber(rage.originRange) or 8, 1, 12)) end
+		if scansSlider then pcall(scansSlider.Set, scansSlider, math.clamp(math.floor(tonumber(rage.originScans) or 4), 1, 10)) end
+		uiSyncing = false
+	end
+	Rage.syncOriginUi = syncOriginUi
+
+	local function manualField(name, value)
+		local manual = rage.manualFields
+		if type(manual) ~= "table" then manual = {} rage.manualFields = manual end
+		manual[name] = value
+	end
+
+	local function fieldsMode(value)
+		rage.originFields = value == "Manual" and "Manual" or "Auto"
+		if rage.originFields == "Manual" then
+			manualField("originRange", true)
+			manualField("originScans", true)
+		else
+			manualField("originRange", nil)
+			manualField("originScans", nil)
+			Rage.profileKey = nil
+			local weapon = Game.weapon()
+			if weapon then pcall(Rage.applyWeaponProfile, weapon) end
+			syncOriginUi()
+		end
+	end
+	Neverlose.cbTags[fieldsMode] = { tbl = rage, key = "originFields" }
+	tip(OriginSettings:AddDropdown("Range & Scans", { "Auto", "Manual" }, rage.originFields, fieldsMode),
+		"Auto: Range и Scans ведёт профиль оружия, слайдеры показывают текущие значения. Manual: крутишь сам, профиль эти два поля не трогает")
+
+	local function fieldSlider(key)
+		local callback = function(value)
+			if uiSyncing then return end
+			if rage.originFields ~= "Manual" then
+				-- Auto: слайдер возвращается к значению профиля
+				task.defer(syncOriginUi)
+				return
+			end
+			rage[key] = value
+			manualField(key, true)
+		end
+		Neverlose.cbTags[callback] = { tbl = rage, key = key }
+		return callback
+	end
+	rangeSlider = OriginSettings:AddSlider("Range", 1, 12, math.clamp(tonumber(rage.originRange) or 8, 1, 12), fieldSlider("originRange"), " st")
+	scansSlider = OriginSettings:AddSlider("Scans", 1, 10, math.clamp(math.floor(tonumber(rage.originScans) or 4), 1, 10), fieldSlider("originScans"))
+	if rage.originScanMode ~= "default" then rage.originScanMode = "optimized" end
+	OriginSettings:AddDropdown("Mode", { "default", "optimized" }, rage.originScanMode, set(rage, "originScanMode"))
 	tip(OriginSettings:AddToggle("Debug Model", rage.originDebug, set(rage, "originDebug")), "Shows the real shot origin, the scanned point and where the last bullet left from")
 	OriginSettings:AddDropdown("Model", { "Saturn", "Self Avatar" }, rage.originModel or "Saturn", set(rage, "originModel"))
 	local function probeToggle(value)
@@ -18283,6 +19442,9 @@ function Menu.aimbot(window, hk)
 			-- Включил автоматику заново — сбрасываем ручные метки, профиль снова
 			-- ведёт все поля.
 			rage.manualFields = {}
+			if rage.originFields == "Manual" then
+				rage.manualFields.originRange, rage.manualFields.originScans = true, true
+			end
 			local weapon = Game.weapon()
 			if weapon then pcall(Rage.applyWeaponProfile, weapon) end
 		end
@@ -18293,16 +19455,20 @@ function Menu.aimbot(window, hk)
 	local Walls = RageMain:AddToggle("Aim Through Walls", rage.autowall, set(rage, "autowall"))
 	tip(Walls, "Capped at what the weapon really penetrates")
 	local WallSettings = Walls:AddSettings()
-	WallSettings:AddSlider("Max Walls", 0, 16, rage.maxWalls, set(rage, "maxWalls"), " w")
-	tip(WallSettings:AddSlider("Multi Ray", 1, 10, rage.multiRay or 3, set(rage, "multiRay"), " rays"), "Rays tested around the aim point when the direct line is blocked. 3-5 is the sweet spot")
+	-- Число стен, лучей и радиус точки — из профиля оружия (Weapon Profiles).
+	-- Ручные слайдеры убраны: они только перебивали профиль и давали отказы.
 	tip(WallSettings:AddToggle("Wall Spot", rage.spotFind ~= false, set(rage, "spotFind")),
-		"Ищет тонкое место в стене: два кольца точек по цели + сдвиг origin вдоль стены. Радиус автоматически ограничен размером хитбока")
-	WallSettings:AddSlider("Spot Radius", 0.2, 2, tonumber(rage.spotRadius) or 0.6, set(rage, "spotRadius"), " st")
+		"Ищет тонкое место в стене: два кольца точек по цели + сдвиг origin вдоль стены. Радиус и число лучей — из профиля оружия")
 	tip(WallSettings:AddToggle("Adaptive Rays", rage.adaptiveRays ~= false, set(rage, "adaptiveRays")),
 		"Два прохода: широкое кольцо → уточнение вокруг лучшей точки. Находит тонкое место лучше, чем 50–100 равномерных лучей")
-	local WallLimit = WallSettings:AddToggle("Wall Limit", rage.wallLimit == true, set(rage, "wallLimit"))
-	tip(WallLimit, "Limit wallbangs to Max Walls (dumpfix wallLimit)")
-	WallSettings:AddSlider("Min Damage", 0, 100, rage.wallMinDamage, set(rage, "wallMinDamage")):SetDisplay(function(v) return v == 0 and "any" or nil end)
+	tip(WallSettings:AddToggle("Wall Hug", rage.wallHug ~= false, set(rage, "wallHug")),
+		"Origin вплотную к стене: пробует точки вдоль стены, с каждой проверяет несколько частей тела, берёт лучший путь")
+	tip(WallSettings:AddToggle("Deep Sweep", rage.deepSweep ~= false, set(rage, "deepSweep")),
+		"Прочёсывает всё тело сеткой точек, когда стена мешает. Ищет путь с минимумом стен и толщины")
+	tip(WallSettings:AddSlider("Wall Aggression", 0, 100, tonumber(rage.wallAggro) or 100, set(rage, "wallAggro"), "%"),
+		"Насколько упорно искать путь через стену. 100 = как раньше. Ниже = меньше лучей, меньше времени на поиск и реже пересканирование: FPS просаживается меньше, но тонкие места находятся хуже. 0 = только базовый скан")
+	tip(WallSettings:AddToggle("View Priority", rage.viewPriority ~= false, set(rage, "viewPriority")),
+		"Цель, которую видит камера (прижался к стене/углу): приоритет, x3 бюджет поиска и origin между тобой и камерой")
 
 	local RageSelection = RageTab:AddSection("Selection", "left")
 	RageSelection:AddDropdown("Hitboxes", { "Head", "Chest", "Stomach", "Arms", "Hands", "Legs", "Feet" }, rage.hitboxList, function(list) rage.hitboxList = list end)
@@ -18319,12 +19485,15 @@ function Menu.aimbot(window, hk)
 	task.delay(3, function()
 		if rage.autoHitChance ~= false then rage.hitChance = 0 pcall(hitSlider.Set, hitSlider, 0) end
 	end)
-	RageSelection:AddSlider("Min Damage", 0, 100, rage.minDamage, set(rage, "minDamage")):SetDisplay(function(v) return v == 0 and "any" or nil end)
+	-- Min Damage идёт из профиля оружия (AWP 30, AK 13, MP9 10).
+	-- Ручной оверрайд — ниже, горячей клавишей.
 	local Override = RageSelection:AddToggle("Min Damage Override", rage.minDmgOverride, set(rage, "minDmgOverride"))
 	hk["Min Damage Override"] = Override
 	Override:AddSettings():AddSlider("Override Damage", 1, 100, rage.minDmgOverrideValue, set(rage, "minDmgOverrideValue"))
 	tip(RageSelection:AddToggle("Shoot Visible First", rage.visFast ~= false, set(rage, "visFast")),
 		"Shitaro-стиль: открытая цель получает первый выстрел сразу — без ожидания стабильности, Delay Shot и паузы после промахов. Выключи, если стреляет слишком рано")
+	tip(RageSelection:AddToggle("Instant Shot", rage.instantShot ~= false, set(rage, "instantShot")),
+		"Отправляет пулю напрямую, не дожидаясь обработки синтетического клика — выстрел уходит на кадр раньше. Если игра начнёт отклонять выстрелы, выключи")
 	tip(RageSelection:AddToggle("Force Body", rage.forceBody, set(rage, "forceBody")), "Skips the head hitbox")
 	local MissBody = RageSelection:AddToggle("Body After Misses", rage.missToBody, set(rage, "missToBody"))
 	tip(MissBody, "Body only after the set number of misses on that enemy")

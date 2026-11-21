@@ -1,3 +1,4 @@
+
 local genv = getgenv and getgenv() or _G
 
 loadstring("getfenv().LPH_NO_VIRTUALIZE = function(...) return ... end")()
@@ -167,7 +168,7 @@ end
 
 local function espColors(main)
 	return {
-		box = main, box2 = rgb(255, 160, 60), boxGradient = false, outline = true, outlineColor = rgb(0, 0, 0),
+		box = main, box2 = rgb(255, 160, 60), boxGradient = false, boxVisTint = false, outline = true, outlineColor = rgb(0, 0, 0),
 		fill = main, fill2 = rgb(255, 160, 60), fillGradient = false,
 		skeleton = main, name = main, distance = rgb(210, 210, 215), weapon = rgb(230, 230, 235), weaponIcon = rgb(255, 255, 255),
 		health = rgb(90, 255, 110), healthLow = rgb(255, 60, 60), healthText = rgb(255, 255, 255),
@@ -187,7 +188,7 @@ local function espColors(main)
 		healthMid = rgb(255, 205, 70), healthGradient = true, hpWidth = 2, armorWidth = 2, ammoWidth = 2, readyWidth = 2,
 		boxRound = 0, hpRound = 0, armorRound = 0, ammoRound = 0, readyRound = 0,
 		skelThick = 1, snapThick = 1, dotSize = 100, iconWidth = 46, iconHeight = 18,
-		nameFont = "Tahoma", nameSize = 12, distanceFont = "Tahoma", distanceSize = 11, healthTextFont = "Tahoma", healthTextSize = 11,
+		nameFont = "Tahoma", nameSize = 12, distanceFont = "Tahoma", distanceSize = 11, healthTextFont = "Tahoma", healthTextSize = 11, ammoTextFont = "Tahoma", ammoTextSize = 11,
 		weaponFont = "Tahoma", weaponSize = 11, flagsFont = "Tahoma", flagsSize = 11, aimFont = "Tahoma", aimSize = 11,
 	}
 end
@@ -233,7 +234,7 @@ Neverlose.config = {
 		arrows = false, arrowColor = rgb(255, 255, 255), sounds = false, soundColor = rgb(90, 200, 255),
 		heardPlayers = true, wallBoost = 60, realPos = true, realPosColor = rgb(255, 60, 60), lastSeen = true, lastSeenTime = 10, lastSeenColor = rgb(255, 190, 90), trail = false, soundKinds = "All", soundStyle = "Chams", soundDuration = 2, soundDistance = 700, soundLabels = true, soundTeam = false,
 		soundLinger = 2, soundRing = "Segmented", soundMaxRadius = 10, soundNeon = true, soundNeonColor = rgb(90, 200, 255), soundNeonPower = 60, soundNeonSize = 50,
-		legit = false, visCheck = true, visibleColor = rgb(80, 255, 120), hiddenColor = rgb(120, 150, 255), snapOrigin = "Bottom", partVis = true,
+		legit = false, visCheck = false, visibleColor = rgb(80, 255, 120), hiddenColor = rgb(120, 150, 255), snapOrigin = "Bottom", partVis = true,
 		arrowRadius = 220, arrowSize = 14,
 		colors = { Enemies = espColors(rgb(255, 60, 80)), Teammates = espColors(rgb(60, 160, 255)) },
 		items = { Enemies = {}, Teammates = {} }, layout = {},
@@ -8400,6 +8401,7 @@ function EspObject.new(entity)
 	self.flags = newText({ Size = 11 })
 	self.aim = newText({ Size = 11, Center = true })
 	self.healthText = newText({ Size = 11, Center = true })
+	self.ammoText = newText({ Size = 11, Center = true })
 	self.healthBack = draw("Line", { Thickness = 4, Color = Color3.new() })
 	self.healthBar = draw("Line", { Thickness = 2 })
 	self.pixOutlines, self.pixRects, self.hpSegs = {}, {}, {}
@@ -8442,8 +8444,8 @@ function EspObject.new(entity)
 end
 
 local DRAWING_KEYS = {
-	"boxGlow", "boxOutline", "box", "fill", "name", "distance", "weapon", "flags", "aim", "healthText", "healthBack", "healthBar", "hpFrame", "hpBack",
-	"armorBack", "armorBar", "ammoBack", "ammoBar", "readyBack", "readyBar", "snap", "headDot", "realPos", "arrow", "arrowWing", "arrowEdge", "arrowEdge2", "arrowGlow", "arrowText",
+	"boxGlow", "boxOutline", "box", "fill", "name", "distance", "weapon", "flags", "aim", "healthText", "ammoText", "healthBack", "healthBar", "hpFrame", "hpBack",
+	"armorBack", "armorBar", "ammoBack", " ", "readyBack", "readyBar", "snap", "headDot", "realPos", "arrow", "arrowWing", "arrowEdge", "arrowEdge2", "arrowGlow", "arrowText",
 }
 
 function Neverlose.partShape(part, toScreen)
@@ -9871,7 +9873,7 @@ function Neverlose.barHost()
 end
 Neverlose.gradientAt = gradientAt
 
-function EspObject:drawBars(colors, position, width)
+function EspObject:drawBars(colors, position, width, height)
 	local low, mid, high = colors.healthLow, colors.healthMid or Color3.fromRGB(255, 205, 70), colors.health
 	local smooth = colors.healthGradient ~= false
 	local info = self:drawGradBar("health", self.healthBack, self.healthBar, colors.hpWidth or 2, HP_SEGMENTS, function(t, ratio)
@@ -9888,8 +9890,37 @@ function EspObject:drawBars(colors, position, width)
 		return function(t) return from:Lerp(base, math.clamp(t, 0, 1)) end
 	end
 	self:drawGradBar("armor", self.armorBack, self.armorBar, colors.armorWidth or 2, 10, gradientBar(colors.armor, colors.armor2, colors.armorGradient), colors.glowArmor and colors.glowArmorColor or nil, colors.glowArmorSize, colors.glowArmorPower, colors.armorRound)
-	self:drawGradBar("ammo", self.ammoBack, self.ammoBar, colors.ammoWidth or 2, 10, gradientBar(colors.ammo, colors.ammo2, colors.ammoGradient), colors.glowAmmo and colors.glowAmmoColor or nil, colors.glowAmmoSize, colors.glowAmmoPower, colors.ammoRound)
+	local ammoColorAt = gradientBar(colors.ammo, colors.ammo2, colors.ammoGradient)
+	local ammoInfo = self:drawGradBar("ammo", self.ammoBack, self.ammoBar, colors.ammoWidth or 2, 10, ammoColorAt, colors.glowAmmo and colors.glowAmmoColor or nil, colors.glowAmmoSize, colors.glowAmmoPower, colors.ammoRound)
 	self:drawGradBar("ready", self.readyBack, self.readyBar, colors.readyWidth or 2, 10, tinted(colors.ready), colors.glowReady and colors.glowReadyColor or nil, colors.glowReadySize, colors.glowReadyPower, colors.readyRound)
+
+	local atext = self.ammoText
+	if atext.Visible and ammoInfo then
+		local asize = colors.ammoTextSize or 11
+		atext.Color = ammoColorAt(ammoInfo.ratio)
+		if ammoInfo.vertical then
+			local top = ammoInfo.lead - ammoInfo.length
+			local tip = math.clamp(ammoInfo.lead - math.floor(ammoInfo.length * ammoInfo.ratio + 0.5), top, ammoInfo.lead)
+			local y = tip - math.floor(asize / 2) - 1
+			if ammoInfo.cross + ammoInfo.thick / 2 < position.X + width / 2 then
+				atext.Align = "Right"
+				atext.Position = Vector2.new(ammoInfo.cross - 4, y)
+			else
+				atext.Align = "Left"
+				atext.Position = Vector2.new(ammoInfo.cross + ammoInfo.thick + 4, y)
+			end
+		else
+			atext.Align = "Center"
+			local tx = ammoInfo.lead + math.floor(ammoInfo.length * ammoInfo.ratio + 0.5)
+			if height and ammoInfo.cross > position.Y + height / 2 then
+				atext.Position = Vector2.new(tx, ammoInfo.cross + ammoInfo.thick + 2)
+			else
+				atext.Position = Vector2.new(tx, ammoInfo.cross - asize - 3)
+			end
+		end
+	elseif atext.Visible then
+		atext.Visible = false
+	end
 
 	local text = self.healthText
 	if text.Visible and info then
@@ -10458,7 +10489,8 @@ function EspObject:update(delta)
 	local espOn = config.enabled and revealed and (isEnemy or (config.teamEnabled or config.showTeam)) and distance <= config.maxDistance
 	if not espOn then return self:hideDrawings() end
 
-	local boxColor, nameColor, skeletonColor, fillColor, snapColor = colors.box, colors.name, colors.skeleton, colors.fill, colors.snapline
+	-- Один цвет ника из пункта Name Color: и в игре, и в превью, без градиентов.
+	local boxColor, nameColor, skeletonColor, fillColor, snapColor = colors.box, config.nameColor or colors.name, colors.skeleton, colors.fill, colors.snapline
 	-- Shitaro-стиль: цвет ESP смешивается hidden -> visible по доле открытого тела
 	-- (visMix из bodySight), а не по одному лучу в голову. Не мигает и не «дышит».
 	local tint
@@ -10466,7 +10498,11 @@ function EspObject:update(delta)
 		local mix = ghostAge and 0 or (self.visMix or self.sightFrac or 0)
 		self.visible = mix >= 0.5
 		tint = config.hiddenColor:Lerp(config.visibleColor, math.clamp(mix, 0, 1))
-		boxColor, nameColor, skeletonColor, fillColor, snapColor = tint, tint, tint, tint, tint
+		-- Milk: бокс и заливка красятся цветом Visibility Check только если включён Visibility Tint в настройках бокса,
+		-- иначе они берут свои цвета из колорпикеров.
+		if colors.boxVisTint then boxColor, fillColor = tint, tint end
+		-- Имя НЕ подменяем тинтом: у него свой цвет из колорпикера Name.
+		skeletonColor, snapColor = tint, tint
 	end
 
 	local rootPoint = currentCamera:WorldToViewportPoint(root.Position)
@@ -10752,10 +10788,24 @@ function EspObject:update(delta)
 	local rounds = equipped and tonumber(equipped.Rounds)
 	local maxRounds = equipped and tonumber(equipped.MaxRounds or equipped.Capacity or equipped.MagazineSize)
 	if item(team, "Main/Ammo Bar") and rounds and maxRounds and maxRounds > 0 then
-		horizontalBar(self.ammoBack, self.ammoBar, position.X, barY + (colors.ammoWidth or 2) / 2, width, math.clamp(rounds / maxRounds, 0, 1), colors.ammo)
+		local ammoTarget = math.clamp(rounds / maxRounds, 0, 1)
+		local ammoNow = self.ammoShown or ammoTarget
+		ammoNow += (ammoTarget - ammoNow) * (1 - math.exp(-(delta or 0.016) * 12))
+		if math.abs(ammoTarget - ammoNow) < 0.002 then ammoNow = ammoTarget end
+		self.ammoShown = ammoNow
+		horizontalBar(self.ammoBack, self.ammoBar, position.X, barY + (colors.ammoWidth or 2) / 2, width, ammoNow, colors.ammo)
 		barY += (colors.ammoWidth or 2) + 3
 	else
 		self.ammoBack.Visible, self.ammoBar.Visible = false, false
+		self.ammoShown = nil
+	end
+
+	self.ammoText.Visible = false
+	if item(team, "Main/Ammo Text") and item(team, "Main/Ammo Bar") and rounds and maxRounds and maxRounds > 0 then
+		self.ammoText.FontName, self.ammoText.Size = colors.ammoTextFont or "Pixel", colors.ammoTextSize or 11
+		self.ammoText.Text = tostring(math.floor(rounds + 0.5))
+		self.ammoText.Glow = colors.glowAmmoText and colors.glowAmmoTextColor or false
+		self.ammoText.Visible = true
 	end
 
 	if item(team, "Weapon/Readiness Bar") and equipName then
@@ -10849,7 +10899,7 @@ function EspObject:update(delta)
 	self.iconOn = iconImage ~= ""
 	self:applyLayout(position, size, colors)
 	self:placeWeaponIcon(iconImage, colors, position, size, root)
-	local okHp, errHp = pcall(self.drawBars, self, colors, position, width)
+	local okHp, errHp = pcall(self.drawBars, self, colors, position, width, size.Y)
 	if not okHp then report(errHp) end
 	local aimedPart = Rage.target and Rage.target.entity == entity and Rage.target.part and Rage.target.part.Name or nil
 	local selected = item(team, "Aimbot/Hitboxes") and Rage.target and Rage.target.entity == entity and BODY_PARTS or EMPTY_LIST
@@ -12115,6 +12165,7 @@ function Preview.build(api)
 	}, layer)
 	ui.aim = label(11)
 	ui.healthText = label(10)
+	ui.ammoText = label(10)
 	ui.flags = label(10, Enum.TextXAlignment.Left)
 	ui.flags.TextYAlignment = Enum.TextYAlignment.Top
 	ui.flags.Size = UDim2.fromOffset(80, 200)
@@ -12357,12 +12408,22 @@ function Preview.update()
 	-- Same box maths as the live ESP: tight corners of the body parts, then padding, fixed size and width scale.
 	local position, boxSize
 	do
+		-- Milk: та же математика, что у боевого ESP (head→feet, защита от «выросших» частей, минимумы,
+		-- ширина вокруг корня). Раньше превью брало силуэт без защиты: оружие/руки растягивали бокс влево.
 		local cfg = Neverlose.config.esp.colors[api:GetTeam() == "Teammates" and "Teammates" or "Enemies"]
 		local rootPart = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
 		local headPart = model:FindFirstChild("Head")
 		local rootPoint = rootPart and project(camera, size, rootPart.Position)
-		local bx0, by0, bx1, by1 = math.huge, math.huge, -math.huge, -math.huge
+		local topPoint = rootPart and project(camera, size, (headPart and headPart.Position or rootPart.Position) + Vector3.new(0, 0.75, 0))
+		local bottomPoint = rootPart and project(camera, size, rootPart.Position - Vector3.new(0, 3, 0))
+		if not (rootPoint and topPoint and bottomPoint) then return end
+		local height = math.max(bottomPoint.Y - topPoint.Y, 4)
+		local width = height * 0.55
+		local px, py = rootPoint.X - width / 2, topPoint.Y
+		local refW, refH = width, height
+		local rootX, rootY = rootPoint.X, rootPoint.Y
 		if cfg.tightBox ~= false then
+			local bx0, by0, bx1, by1 = math.huge, math.huge, -math.huge, -math.huge
 			for _, part in ipairs(model:GetDescendants()) do
 				if Neverlose.silhouettePart(part) then
 					local cf, extent = part.CFrame, Neverlose.partExtents(part) / 2
@@ -12379,47 +12440,58 @@ function Preview.update()
 					end
 				end
 			end
-		end
-		local centerX, centerY
-		if bx0 ~= math.huge and bx1 - bx0 > 2 then
-			bx0, by0, bx1, by1 = math.floor(bx0), math.floor(by0), math.floor(bx1), math.floor(by1)
-			position, boxSize = Vector2.new(bx0, by0), Vector2.new(bx1 - bx0, by1 - by0)
-			centerX, centerY = bx0 + (bx1 - bx0) / 2, rootPoint and rootPoint.Y or (by0 + by1) / 2
-		else
-			local topPoint = project(camera, size, (headPart and headPart.Position or rootPart.Position) + Vector3.new(0, 0.75, 0))
-			local bottomPoint = project(camera, size, rootPart.Position - Vector3.new(0, 3, 0))
-			if not (topPoint and bottomPoint and rootPoint) then return end
-			local height = math.max(bottomPoint.Y - topPoint.Y, 4)
-			position, boxSize = Vector2.new(rootPoint.X - height * 0.275, topPoint.Y), Vector2.new(height * 0.55, height)
-			centerX, centerY = rootPoint.X, rootPoint.Y
+			local stray = bx0 ~= math.huge and (by1 - by0 > refH * 1.5 or bx1 - bx0 > math.max(refW * 2, refH))
+			if bx0 ~= math.huge and not stray and bx1 - bx0 > 2 and by1 - by0 > 2 then
+				px, py = math.floor(bx0), math.floor(by0)
+				width, height = math.floor(bx1) - math.floor(bx0), math.floor(by1) - math.floor(by0)
+				rootX = px + width / 2
+			end
 		end
 		if cfg.fixedBox == true then
-			local fw, fh = math.clamp(cfg.fixedW or 46, 10, 400), math.clamp(cfg.fixedH or 84, 10, 600)
-			position, boxSize = Vector2.new(centerX - fw / 2, centerY - fh / 2), Vector2.new(fw, fh)
+			width, height = math.clamp(cfg.fixedW or 46, 10, 400), math.clamp(cfg.fixedH or 84, 10, 600)
+			px, py = rootX - width / 2, rootY - height / 2
 		else
-			local pad = boxSize.Y * math.clamp((cfg.boxPad or 5) / 100, 0, 0.4)
-			position = Vector2.new(position.X - pad, position.Y - pad)
-			boxSize = Vector2.new(boxSize.X + pad * 2, boxSize.Y + pad * 2)
+			local minW = math.max(height * 0.5, 6)
+			if width < minW then
+				width = minW
+				px = rootX - width / 2
+			end
+			width, height = math.floor(width + 0.5), math.floor(height + 0.5)
+			px, py = math.floor(px + 0.5), math.floor(py + 0.5)
+			local pad = height * math.clamp((cfg.boxPad or 5) / 100, 0, 0.4)
+			px, py = px - pad, py - pad
+			width, height = width + pad * 2, height + pad * 2
 		end
 		local widthScale = math.clamp((cfg.boxWidth or 100) / 100, 0.3, 3)
 		if widthScale ~= 1 then
-			boxSize = Vector2.new(boxSize.X * widthScale, boxSize.Y)
-			position = Vector2.new(centerX - boxSize.X / 2, position.Y)
+			width = width * widthScale
+			px = rootX - width / 2
 		end
 		if cfg.fixedBox ~= true then
 			local minWidth = math.clamp(tonumber(cfg.minWidth) or 18, 0, 200)
 			local minHeight = math.clamp(tonumber(cfg.minHeight) or 36, 0, 400)
-			local grow = math.clamp(minHeight / math.max(boxSize.Y, 0.001), 1, 1.2)
-			if grow > 1 or boxSize.X < minWidth then
-				local midX, midY = position.X + boxSize.X / 2, position.Y + boxSize.Y / 2
-				boxSize = Vector2.new(math.max(boxSize.X * grow, minWidth), boxSize.Y * grow)
-				position = Vector2.new(midX - boxSize.X / 2, midY - boxSize.Y / 2)
+			local grow = math.clamp(minHeight / math.max(height, 0.001), 1, 1.2)
+			if grow > 1 or width < minWidth then
+				local midX, midY = px + width / 2, py + height / 2
+				width, height = math.min(math.max(width * grow, minWidth), height * grow * 0.7), height * grow
+				px, py = midX - width / 2, midY - height / 2
 			end
 		end
+		-- Бокс всегда целиком в окне превью, даже если модель сдвинута к краю.
+		local margin = 4
+		px = math.clamp(px, margin, math.max(size.X - margin - width, margin))
+		position, boxSize = Vector2.new(px, py), Vector2.new(width, height)
 	end
 	local center = position.X + boxSize.X / 2
 
-	local boxColor, nameColor, skeletonColor, fillColor = colors.box, colors.name, colors.skeleton, colors.fill
+	local boxColor, nameColor, skeletonColor, fillColor, snapColor = colors.box, config.nameColor or colors.name, colors.skeleton, colors.fill, colors.snapline
+	-- Как в игре: при включённой Visibility Check цвета бокса/скелета/заливки/снаплайна заменяются цветом видимой цели.
+	-- Имя исключено — оно всегда берёт ровно свой Name-цвет.
+	if config.visCheck and isEnemy then
+		local tint = config.visibleColor
+		if colors.boxVisTint then boxColor, fillColor = tint, tint end
+		skeletonColor, snapColor = tint, tint
+	end
 
 	local showBox = item(team, "Main/Bounding Box")
 	local style = config.boxStyle
@@ -12504,6 +12576,7 @@ function Preview.update()
 	styleText(ui.weapon, "weaponFont", "weaponSize", "glowWeapon", 11)
 	styleText(ui.flags, "flagsFont", "flagsSize", "glowFlags", 11)
 	styleText(ui.aim, "aimFont", "aimSize", "glowAim", 11)
+	styleText(ui.ammoText, "ammoTextFont", "ammoTextSize", "glowAmmoText", 11)
 	styleText(ui.healthText, "healthTextFont", "healthTextSize", "glowHealthText", 11)
 	ui.name.Visible = item(team, "Main/Name")
 	ui.name.Text = isEnemy and "Enemy" or localPlayer.DisplayName
@@ -12545,6 +12618,9 @@ function Preview.update()
 	ui.healthText.Visible = item(team, "Main/Health Text")
 	ui.healthText.Text = "76"
 	ui.healthText.TextColor3 = colors.healthText
+
+	ui.ammoText.Visible = item(team, "Main/Ammo Text") and item(team, "Main/Ammo Bar")
+	ui.ammoText.Text = "18"
 
 	local shown = {}
 	if item(team, "Main/Health Bar") then shown.health = true end
@@ -12677,7 +12753,8 @@ function Preview.update()
 	local armorTop, armorLow = barPair(colors.armor, colors.armor2, colors.armorGradient)
 	local ammoTop, ammoLow = barPair(colors.ammo, colors.ammo2, colors.ammoGradient)
 	setBar(ui.armor, "armor", 0.55, colors.armor, armorTop, armorLow, "armorWidth", "glowArmor", "armorRound")
-	setBar(ui.ammo, "ammo", 0.6, colors.ammo, ammoTop, ammoLow, "ammoWidth", "glowAmmo", "ammoRound")
+	local ammoRatio = 0.5 + 0.45 * math.sin(nowClock * 0.9 + 1)
+	setBar(ui.ammo, "ammo", ammoRatio, colors.ammo, ammoTop, ammoLow, "ammoWidth", "glowAmmo", "ammoRound")
 	setBar(ui.ready, "ready", 0.85, colors.ready, nil, nil, "readyWidth", "glowReady", "readyRound")
 
 	for id, label in pairs(sized) do
@@ -12747,6 +12824,35 @@ function Preview.update()
 		healthLabel.Position = UDim2.fromOffset(x - 4, y + h * (1 - hp))
 	end
 
+	local ammoLabel = ui.ammoText
+	ammoLabel.Text = tostring(math.floor(ammoRatio * 30 + 0.5))
+	local ammoAnim = anim.ammo
+	if ammoAnim and ui.ammo.back.Visible and ammoLabel.Visible then
+		if ammoTop then
+			ammoLabel.TextColor3 = ammoLow:Lerp(ammoTop, ammoRatio)
+		else
+			ammoLabel.TextColor3 = colors.ammo
+		end
+		if ammoAnim.h >= ammoAnim.w then
+			local outerLeft = ammoAnim.x + ammoAnim.w / 2 < x + w / 2
+			local tip = ammoAnim.y + ammoAnim.h - 1 - (ammoAnim.h - 2) * ammoRatio
+			ammoLabel.AnchorPoint = Vector2.new(outerLeft and 1 or 0, 0.5)
+			ammoLabel.TextXAlignment = outerLeft and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left
+			ammoLabel.Position = UDim2.fromOffset(outerLeft and ammoAnim.x - 4 or ammoAnim.x + ammoAnim.w + 4, tip)
+		else
+			local tip = ammoAnim.x + 1 + (ammoAnim.w - 2) * ammoRatio
+			ammoLabel.AnchorPoint = Vector2.new(0.5, 0)
+			ammoLabel.TextXAlignment = Enum.TextXAlignment.Center
+			if ammoAnim.y + ammoAnim.h / 2 > y + h / 2 then
+				ammoLabel.Position = UDim2.fromOffset(tip, ammoAnim.y + ammoAnim.h + 2)
+			else
+				ammoLabel.Position = UDim2.fromOffset(tip, ammoAnim.y - ammoLabel.TextSize - 3)
+			end
+		end
+	else
+		ammoLabel.Visible = false
+	end
+
 	local head = points.Head
 	ui.headDot.Visible = item(team, "Main/Head Dot") and head ~= nil
 	if ui.headDot.Visible then
@@ -12765,9 +12871,9 @@ function Preview.update()
 
 	ui.snap.Visible = item(team, "Main/Snaplines")
 	if ui.snap.Visible then
-		local origin = config.snapOrigin == "Top" and Vector2.new(center, 0)
+		local origin = config.snapOrigin == "Top" and Vector2.new(size.X / 2, 0)
 			or config.snapOrigin == "Center" and Vector2.new(size.X / 2, size.Y / 2) or Vector2.new(size.X / 2, size.Y)
-		line(ui.snap, origin, Vector2.new(center, y + h), colors.snapline, colors.snapThick or 1)
+		line(ui.snap, origin, Vector2.new(center, y + h), snapColor, colors.snapThick or 1)
 	end
 
 	local skeleton = item(team, "Main/Skeleton")
@@ -18958,6 +19064,9 @@ function Menu.loadLibrary()
 		{ 'SafeMode = "Automatic", Theme = "Dark" }', 'SafeMode = "Automatic", Theme = "Dark", NLSync = "Off" }' },
 		{ 'SafeMode = { "Automatic", "Enabled", "Disabled" },', 'SafeMode = { "Automatic", "Enabled", "Disabled" }, NLSync = { "Off", "On" },' },
 		{ 'Name = "SelectedCheck", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, -22, 0.5, 0)', 'Name = "SelectedCheck", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, -15, 0.5, 0)' },
+		-- Milk: на повторном открытии ladder() ставил InputSink на уровень SV-квадрата, hue/alpha и пресетов,
+		-- а он добавлен последним и перехватывал клики. Держим его на уровне кадра, под контролами.
+		{ 'if d:IsA("GuiObject") then d.ZIndex = base + (d:GetAttribute("CpZ") or 1) end', 'if d:IsA("GuiObject") then d.ZIndex = base + (d:GetAttribute("CpZ") or 1) if d.Name == "InputSink" then d.ZIndex = base end end' },
 	}) do
 		local from, to = source:find(pair[1], 1, true)
 		if from then source = source:sub(1, from - 1) .. pair[2] .. source:sub(to + 1) end
@@ -19241,14 +19350,14 @@ end
 
 local CHIP_COLORS = {
 	["Main/Bounding Box"] = "box", ["Main/Name"] = "name", ["Main/Distance"] = "distance", ["Main/Health Bar"] = "health",
-	["Main/Ammo Bar"] = "ammo", ["Main/Skeleton"] = "skeleton", ["Main/Armor Bar"] = "armor", ["Main/Health Text"] = "healthText",
+	["Main/Ammo Bar"] = "ammo", ["Main/Skeleton"] = "skeleton", ["Main/Armor Bar"] = "armor", ["Main/Health Text"] = "healthText", ["Main/Ammo Text"] = "ammo",
 	["Main/Snaplines"] = "snapline", ["Main/Head Dot"] = "headDot", ["Weapon/Text"] = "weapon", ["Weapon/Icon"] = "weaponIcon",
 	["Weapon/Readiness Bar"] = "ready", ["Weapon/Bomb"] = "weapon", ["Weapon/Defuser"] = "weapon", ["Weapon/Taser"] = "weapon",
 	["Aimbot/Hit Chance"] = "aim", ["Aimbot/Hitboxes"] = "hitboxes",
 }
 
 local ITEM_GROUPS = {
-	{ "Main", { "Bounding Box", "Name", "Distance", "Health Bar", "Armor Bar", "Health Text", "Ammo Bar", "Skeleton", "Snaplines", "Head Dot" } },
+	{ "Main", { "Bounding Box", "Name", "Distance", "Health Bar", "Armor Bar", "Health Text", "Ammo Bar", "Ammo Text", "Skeleton", "Snaplines", "Head Dot" } },
 	{ "Flags", { "Unarmored", "Defuser", "Blind", "Scoped", "Reload", "Immunity", "Slowed", "Vulnerable", "Bomb", "Defuse", "Pin Pulled", "Money", "Order Priority", "Delay", "Sees You" } },
 	{ "Weapon", { "Text", "Icon", "Readiness Bar", "Bomb", "Defuser", "Taser" } },
 	{ "Aimbot", { "Hit Chance", "Hitboxes" } },
@@ -19365,6 +19474,10 @@ function Menu.visuals(window, hk)
 	end)
 	-- Второй цвет как в Shitaro: видимая цель / цель за стеной.
 	espSettings:AddColorpicker("Visible Color", esp.visibleColor, setColor(esp, "visibleColor"))
+	-- Один общий цвет ника: применяется и в игре, и в превью, без градиентов.
+	espSettings:AddColorpicker("Name Color", esp.nameColor or esp.colors.Enemies.name, function(color)
+		if typeof(color) == "Color3" then esp.nameColor = color end
+	end)
 	local arrow = enemy:AddToggleColorpicker("Offscreen Arrow", esp.arrows, esp.arrowColor, set(esp, "arrows"), setColor(esp, "arrowColor"))
 	local arrowSettings = arrow:AddSettings()
 	arrowSettings:AddSlider("Radius", 80, 500, esp.arrowRadius, set(esp, "arrowRadius"), "px")
@@ -19447,12 +19560,15 @@ function Menu.visuals(window, hk)
 
 	local EXTRA = {
 		["Main/Bounding Box"] = {
+			{ "Box Color", "color", "box" },
+			{ "Visibility Tint", "toggle", "boxVisTint", both = true, tab = "Colors" },
+			{ "Gradient", "toggle", "boxGradient", tab = "Colors" }, { "Gradient Color", "color", "box2" },
+			{ "Outline", "toggle", "outline", tab = "Colors" }, { "Outline Color", "color", "outlineColor" },
+			{ "Fill Color", "color", "fill" },
+			{ "Fill Gradient", "toggle", "fillGradient", tab = "Colors" }, { "Fill Gradient Color", "color", "fill2" },
 			D("Style", "boxStyle", BOX_STYLES, true),
-			{ "Outline", "toggle", "outline" }, { "Outline Color", "color", "outlineColor" },
-			{ "Gradient", "toggle", "boxGradient" }, { "Gradient Color", "color", "box2" },
 			D("Gradient Direction", "boxGradDir", { "Vertical", "Horizontal", "Diagonal" }), S("Gradient Mix", "gradMix", 10, 90, "%"),
-			{ "Fill Color", "color", "fill" }, S("Fill Opacity", "fillAlpha", 5, 80, "%"),
-			{ "Fill Gradient", "toggle", "fillGradient" }, { "Fill Gradient Color", "color", "fill2" },
+			S("Fill Opacity", "fillAlpha", 5, 80, "%"),
 			T("Tight Box", "tightBox", true), S("Padding", "boxPad", 0, 25, "%"),
 			T("Fixed Size", "fixedBox", false), S("Fixed Width", "fixedW", 20, 200, "px"), S("Fixed Height", "fixedH", 30, 300, "px"),
 			S("Min Width", "minWidth", 0, 200, "px", 18), S("Min Height", "minHeight", 0, 400, "px", 36),
@@ -19470,7 +19586,7 @@ function Menu.visuals(window, hk)
 	}
 	for path, keys in pairs({
 		["Main/Name"] = { "nameFont", "nameSize" }, ["Main/Distance"] = { "distanceFont", "distanceSize" },
-		["Main/Health Text"] = { "healthTextFont", "healthTextSize" }, ["Weapon/Text"] = { "weaponFont", "weaponSize" },
+		["Main/Health Text"] = { "healthTextFont", "healthTextSize" }, ["Main/Ammo Text"] = { "ammoTextFont", "ammoTextSize" }, ["Weapon/Text"] = { "weaponFont", "weaponSize" },
 		["Aimbot/Hit Chance"] = { "aimFont", "aimSize" },
 	}) do
 		EXTRA[path] = EXTRA[path] or {}
@@ -19486,7 +19602,7 @@ function Menu.visuals(window, hk)
 	end
 	for path, key in pairs({
 		["Main/Bounding Box"] = "Box", ["Main/Name"] = "Name", ["Main/Distance"] = "Distance", ["Main/Health Bar"] = "Health",
-		["Main/Armor Bar"] = "Armor", ["Main/Ammo Bar"] = "Ammo", ["Weapon/Readiness Bar"] = "Ready", ["Main/Health Text"] = "HealthText",
+		["Main/Armor Bar"] = "Armor", ["Main/Ammo Bar"] = "Ammo", ["Weapon/Readiness Bar"] = "Ready", ["Main/Health Text"] = "HealthText", ["Main/Ammo Text"] = "AmmoText",
 		["Main/Skeleton"] = "Skeleton", ["Main/Snaplines"] = "Snap", ["Main/Head Dot"] = "Head", ["Weapon/Text"] = "Weapon",
 		["Weapon/Bomb"] = "Weapon", ["Weapon/Defuser"] = "Weapon", ["Weapon/Taser"] = "Weapon", ["Aimbot/Hit Chance"] = "Aim",
 	}) do addGlow(path, key) end
@@ -19502,11 +19618,11 @@ function Menu.visuals(window, hk)
 	local extraState = setmetatable({}, { __mode = "k" })
 	local TEXT_COLOR = Color3.fromRGB(205, 208, 220)
 
-	local function buildExtras(picker, defs, createPicker)
+	local function buildExtras(picker, defs, createPicker, mainKey)
 		local frame = picker.frame
 		local base = frame:FindFirstChild("SVSquare")
 		local z = base and base.ZIndex or 10802
-		local state = { controls = {} }
+		local state = { controls = {}, mainKey = mainKey }
 		local NL = {
 			accent = Color3.fromRGB(110, 130, 255), plate = Color3.fromRGB(28, 31, 44), plateHover = Color3.fromRGB(38, 42, 58),
 			track = Color3.fromRGB(45, 48, 64), text = Color3.fromRGB(226, 228, 238), muted = Color3.fromRGB(150, 154, 172),
@@ -19627,7 +19743,7 @@ function Menu.visuals(window, hk)
 		local MAX_SHOWN = 190
 		local tabsOrder, tabDefs = {}, {}
 		for _, d in ipairs(defs) do
-			local tab = d[2] == "color" and "Colors" or (tostring(d[1]):find("Glow", 1, true) and "Glow") or (d[2] == "toggle" and "Options") or "Layout"
+			local tab = d.tab or (d[2] == "color" and "Colors") or (tostring(d[1]):find("Glow", 1, true) and "Glow") or (d[2] == "toggle" and "Options") or "Layout"
 			d.tab = tab
 			if not tabDefs[tab] then tabDefs[tab] = 0 tabsOrder[#tabsOrder + 1] = tab end
 			tabDefs[tab] += 1
@@ -19701,6 +19817,82 @@ function Menu.visuals(window, hk)
 				tabButtons[tab] = button
 			end
 			rows.Position = UDim2.fromOffset(MARGIN, BASE_H + 21 + 28)
+		end
+		-- Второй колорпикер (из строки Color в настройках) открывался по слоям ниже списка настроек, и список,
+		-- перехватывая мышь, не давал выбрать цвет. Поднимаем весь его слой (сам кадр и всё внутри) выше строк
+		-- и вкладок, но ниже выпадающих списков.
+		local watched = setmetatable({}, { __mode = "k" })
+
+		-- Пока открыт второй колорпикер, нижний (основной) и строки настроек под ним мышь не получают:
+		-- прозрачный поглотитель ввода лежит над ними и под вторым пикером. Закрылся верхний — снова работают.
+		local SUB_Z, BLOCK_Z = 8 + 14, 8 + 12
+		local blocker = Instance.new("Frame")
+		blocker.Name, blocker.Size, blocker.BackgroundTransparency, blocker.BorderSizePixel = "ExtraBlocker", UDim2.fromScale(1, 1), 1, 0
+		blocker.Active, blocker.Visible, blocker.ZIndex = true, false, frame.ZIndex + BLOCK_Z
+		blocker.Parent = frame
+		-- Milk: sub.Visible остаётся true, когда второй пикер на деле скрыт (закрыт вместе с основным или
+		-- спрятан родителем). Из-за этого поглотитель залипал включённым и перекрывал основной пикер целиком:
+		-- цвет не выбирался, а после повторного открытия не работало вообще. Теперь считаем «открыт» только
+		-- если видны сам кадр и все его предки, и перепроверяем по таймеру, чтобы залипание не могло остаться.
+		local function reallyShown(gui)
+			local current = gui
+			while current do
+				if current:IsA("GuiObject") then
+					if not current.Visible then return false end
+				elseif current:IsA("LayerCollector") then
+					return current.Enabled
+				end
+				current = current.Parent
+			end
+			return false
+		end
+		local function refreshBlocker()
+			local open = false
+			for sub in pairs(watched) do
+				if sub.Parent and reallyShown(sub) then open = true break end
+			end
+			blocker.ZIndex = frame.ZIndex + BLOCK_Z
+			blocker.Visible = open and reallyShown(frame)
+		end
+		frame:GetPropertyChangedSignal("Visible"):Connect(refreshBlocker)
+		task.spawn(function()
+			while rows.Parent and frame.Parent do
+				task.wait(0.2)
+				refreshBlocker()
+				if state.syncMain and frame.Visible then pcall(state.syncMain) end
+			end
+		end)
+
+		-- Второй колорпикер (из строки Color в настройках) открывался по слоям ниже списка настроек, и список,
+		-- перехватывая мышь, не давал выбрать цвет. Поднимаем весь его слой (сам кадр и всё внутри) выше строк
+		-- и вкладок, но ниже выпадающих списков.
+		local function raiseAbove(subFrame)
+			if not subFrame or not subFrame.Parent or not subFrame:IsA("GuiObject") then return end
+			local want = frame.ZIndex + SUB_Z
+			local delta = want - subFrame.ZIndex
+			if delta > 0 then
+				subFrame.ZIndex += delta
+				for _, d in ipairs(subFrame:GetDescendants()) do
+					if d:IsA("GuiObject") then d.ZIndex += delta end
+				end
+			end
+			refreshBlocker()
+		end
+		local function watchSub(subFrame)
+			if not subFrame or watched[subFrame] or not subFrame:IsA("GuiObject") then return end
+			watched[subFrame] = true
+			-- Active = true: кадр сам поглощает мышь, всё, что под ним, её не получает.
+			subFrame.Active = true
+			subFrame:GetPropertyChangedSignal("ZIndex"):Connect(function() task.defer(raiseAbove, subFrame) end)
+			subFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+				refreshBlocker()
+				if subFrame.Visible then
+					task.defer(raiseAbove, subFrame)
+					task.delay(0.05, raiseAbove, subFrame)
+				end
+			end)
+			subFrame.AncestryChanged:Connect(refreshBlocker)
+			if subFrame.Visible then task.defer(raiseAbove, subFrame) end
 		end
 		for index, def in ipairs(defs) do
 			local label, kind = def[1], def[2]
@@ -20000,9 +20192,35 @@ function Menu.visuals(window, hk)
 				outline(swatch, 0.85)
 				swatch.MouseEnter:Connect(function() ease(swatch, { Size = UDim2.fromOffset(38, 18) }, 0.12) end)
 				swatch.MouseLeave:Connect(function() ease(swatch, { Size = UDim2.fromOffset(34, 18) }, 0.14) end)
-				local sub = createPicker(swatch, esp.colors.Enemies[key] or Color3.new(1, 1, 1), function(color)
+				local sub
+				sub = createPicker(swatch, esp.colors.Enemies[key] or Color3.new(1, 1, 1), function(color)
 					esp.colors[state.team][key] = color
 					swatch.BackgroundColor3 = color
+					if key == state.mainKey then pcall(picker.Set, color) end
+				end)
+				if key == state.mainKey then
+					state.syncMain = function()
+						local current = esp.colors[state.team or "Enemies"][key]
+						if typeof(current) == "Color3" and swatch.BackgroundColor3 ~= current then
+							swatch.BackgroundColor3 = current
+							pcall(sub.Set, current)
+						end
+					end
+				end
+				local subFrame = type(sub) == "table" and typeof(sub.frame) == "Instance" and sub.frame or nil
+				if subFrame then watchSub(subFrame) end
+				-- Milk: кадр второго пикера строится при первом открытии — берём его у самого пикера.
+				-- Раньше брался ЛЮБОЙ видимый ColorPickerFrame, и чужой пикер залипал блокировщиком поверх основного.
+				swatch.MouseButton1Click:Connect(function()
+					local function attachSub()
+						local built = type(sub) == "table" and sub.frame
+						if typeof(built) == "Instance" and built:IsA("GuiObject") then
+							watchSub(built)
+							raiseAbove(built)
+						end
+					end
+					task.defer(attachSub)
+					task.delay(0.05, attachSub)
 				end)
 				state.controls[#state.controls + 1] = function()
 					local color = esp.colors[state.team][key]
@@ -20024,6 +20242,9 @@ function Menu.visuals(window, hk)
 			raiseOverlay(top)
 			rule.ZIndex, rows.ZIndex = top - 1, top - 1
 			extraBg.ZIndex, extraTop.ZIndex = top - 2, top - 2
+			blocker.ZIndex = frame.ZIndex + BLOCK_Z
+			local sink = frame:FindFirstChild("InputSink")
+			if sink and sink:IsA("GuiObject") then sink.ZIndex = frame.ZIndex end
 			for _, d in ipairs(rows:GetDescendants()) do
 				if d:IsA("GuiObject") then d.ZIndex = top + (d:GetAttribute("Lv") or 0) end
 			end
@@ -20061,24 +20282,34 @@ function Menu.visuals(window, hk)
 		return state
 	end
 
+	local function chipKey(group, itemName) return group == "Flags" and "flags" or CHIP_COLORS[group .. "/" .. itemName] end
+
 	local function onPicker(team, group, itemName, picker, createPicker)
 		local defs = EXTRA[group .. "/" .. itemName]
 		if not defs then return end
-		local state = extraState[picker]
-		if not state then
-			state = buildExtras(picker, defs, createPicker)
-			extraState[picker] = state
+		local function attach()
+			if typeof(picker.frame) ~= "Instance" then return end
+			local state = extraState[picker]
+			if not state then
+				local ok, built = xpcall(buildExtras, debug.traceback, picker, defs, createPicker, chipKey(group, itemName))
+				if not ok then
+					warn("[Neverlose] picker extras failed: " .. tostring(built))
+					return
+				end
+				state = built
+				extraState[picker] = state
+			end
+			state.team = team
+			for _, refresh in ipairs(state.controls) do pcall(refresh) end
+			if state.reapply then
+				task.defer(state.reapply)
+				task.delay(0.05, state.reapply)
+				task.delay(0.15, state.reapply)
+			end
 		end
-		state.team = team
-		for _, refresh in ipairs(state.controls) do pcall(refresh) end
-		if state.reapply then
-			task.defer(state.reapply)
-			task.delay(0.05, state.reapply)
-			task.delay(0.15, state.reapply)
-		end
+		-- Milk: кадр пикера появляется только после первого открытия — тогда и строим настройки.
+		if typeof(picker.frame) == "Instance" then attach() else task.defer(attach) end
 	end
-
-	local function chipKey(group, itemName) return group == "Flags" and "flags" or CHIP_COLORS[group .. "/" .. itemName] end
 
 	local preview = players:AddESPPreview({
 		team = "Enemies",
@@ -20089,11 +20320,13 @@ function Menu.visuals(window, hk)
 		end,
 		getColor = function(team, group, itemName)
 			local key = chipKey(group, itemName)
+			if group == "Main" and itemName == "Name" then return esp.nameColor or esp.colors[team].name end
 			return key and esp.colors[team][key] or nil
 		end,
 		onPicker = onPicker,
 		onItemColor = function(team, group, itemName, color)
 			local key = chipKey(group, itemName)
+			if group == "Main" and itemName == "Name" then esp.nameColor = color end
 			if key then esp.colors[team][key] = color end
 		end,
 	})
@@ -21915,6 +22148,24 @@ function Menu.build()
 			if not header then return end
 			for _, child in ipairs(header:GetChildren()) do
 				if (child.Name == "BlurArea" or child.Name:find("^ShadowRing")) and child.Visible then child.Visible = false end
+			end
+		end))
+	end
+
+	-- Milk: страховка для всех колорпикеров: InputSink лежит на уровне кадра, под SV, hue/alpha, hex и пресетами.
+	do
+		local nextSink = 0
+		maid:give(runService.Heartbeat:Connect(function()
+			local now = os.clock()
+			if now < nextSink then return end
+			nextSink = now + 0.2
+			local okMain, main = pcall(function() return Neverlose.window and Neverlose.window:GetMainFrame() end)
+			if not okMain or typeof(main) ~= "Instance" then return end
+			for _, child in ipairs(main:GetChildren()) do
+				if child.Name == "ColorPickerFrame" and child.Visible then
+					local sink = child:FindFirstChild("InputSink")
+					if sink and sink:IsA("GuiObject") and sink.ZIndex ~= child.ZIndex then sink.ZIndex = child.ZIndex end
+				end
 			end
 		end))
 	end
